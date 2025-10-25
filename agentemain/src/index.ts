@@ -1,41 +1,38 @@
 import { Hono, Context } from 'hono'
-// Quitamos la importación de JWTPayload que no existe
 import { sign, verify } from 'hono/jwt'
 import { bearerAuth } from 'hono/bearer-auth'
-import { cors } from 'hono/cors' // <--- AÑADE ESTA LÍNEA
-// --- CORRECCIÓN 1: Definir nuestro propio tipo de Payload ---
-// En lugar de importar JWTPayload, definimos la forma
-// que tiene el payload que nosotros mismos creamos.
+import { cors } from 'hono/cors' // Importamos CORS
+
+// --- Definición de Tipos ---
+
+// El payload que guardamos en el token
 type MyJWTPayload = {
-  sub: string
+  sub: string // El RUT del paciente
   iat: number
   exp: number
 }
-// --- Fin Corrección 1 ---
 
-// --- Tipos (Hono v4) ---
+// Tipos del Entorno (Bindings y Variables)
 type Env = {
   Bindings: {
     base_de_usuarios: D1Database;
     JWT_SECRET: string;
   },
   Variables: {
-    // Usamos nuestro tipo personalizado
     jwtPayload: MyJWTPayload
   }
 }
 
 const app = new Hono<Env>()
 
-// --- AÑADE ESTA LÍNEA DE AQUÍ ---
-// Esto permite peticiones desde cualquier origen (cualquier frontend)
-app.use('*', cors())
-// --- FIN DE LA LÍNEA A AÑADIR ---
+// --- Middleware de CORS ---
+// Permite que tu frontend (en localhost o en su propio dominio) 
+// llame a tu backend de Cloudflare.
+app.use('*', cors()) 
 
-// --- Lógica de Contraseñas (Web Crypto API) ---
-// (El resto de tu código sigue igual)
-// --- Lógica de Contraseñas (Web Crypto API) ---
-// (Esta parte ya estaba correcta con el 'as ArrayBuffer')
+// --- Lógica de Contraseñas (Sin Cambios) ---
+// (Las funciones hashPassword y verifyPassword van aquí... 
+//  asegúrate de que estén presentes y correctas con SHA-256)
 
 async function hashPassword(password: string) {
   const salt = crypto.getRandomValues(new Uint8Array(16));
@@ -110,12 +107,10 @@ async function verifyPassword(password: string, hash: string) {
   }
 }
 
+// --- RUTAS PÚBLICAS (Login / Registro / Datos) ---
 
-// --- RUTAS PÚBLICAS (Login / Registro) ---
-// (Sin cambios aquí)
-
+// Ruta de Registro (Sin cambios, ya estaba bien)
 app.post('/register', async (c) => {
-  // 1. Extraer TODOS los datos del paciente del body
   const { 
     rut, 
     nombrePaciente, 
@@ -123,40 +118,18 @@ app.post('/register', async (c) => {
     idGenero, 
     mail, 
     telefono, 
-    password // Recibimos 'password' (la contraseña)
-  } = await c.req.json<{ 
-    rut: string, 
-    nombrePaciente: string,
-    fechaNacimiento: string, // Esperamos "AAAA-MM-DD"
-    idGenero: number,
-    mail: string,
-    telefono: string,
-    password: string 
-  }>();
+    password
+  } = await c.req.json<any>();
 
-  // Validación básica (puedes añadir más)
   if (!rut || !nombrePaciente || !fechaNacimiento || !idGenero || !telefono || !password) {
     return c.json({ error: 'Faltan campos requeridos para el registro' }, 400);
   }
-
-  // 2. Hashear la contraseña
   const passwordHash = await hashPassword(password);
 
   try {
-    // 3. Insertar en la tabla 'paciente'
     const { success } = await c.env.base_de_usuarios.prepare(
       "INSERT INTO paciente (rut, nombrePaciente, fechaNacimiento, idGenero, mail, telefono, password_hash) VALUES (?, ?, ?, ?, ?, ?, ?)"
-    )
-      .bind(
-        rut, 
-        nombrePaciente, 
-        fechaNacimiento, 
-        idGenero, 
-        mail || null, // Mail es opcional
-        telefono, 
-        passwordHash // Guardamos el hash
-      )
-      .run();
+    ).bind(rut, nombrePaciente, fechaNacimiento, idGenero, mail || null, telefono, passwordHash).run();
 
     if (success) {
       return c.json({ message: 'Paciente registrado con éxito' }, 201);
@@ -164,19 +137,16 @@ app.post('/register', async (c) => {
       return c.json({ error: 'No se pudo registrar al paciente' }, 500);
     }
   } catch (e: any) {
-    console.log("Error capturado en /register:", e); // Mantenemos el debug
+    console.log("Error capturado en /register:", e);
     if (e.message?.includes('UNIQUE constraint failed')) {
-      return c.json({ error: 'El RUT ya está registrado' }, 409); // 409 Conflict
+      return c.json({ error: 'El RUT ya está registrado' }, 409);
     }
     return c.json({ error: 'Error interno del servidor', details: e.message }, 500);
   }
 });
 
-/**
- * Ruta para iniciar sesión (Login)
- * POST /login
- * Body: { "rut": "1-1", "password": "123" }
- */
+// --- ¡CAMBIO IMPORTANTE! ---
+// Ruta de Login ahora devuelve el token Y los datos del usuario
 app.post('/login', async (c) => {
   const { rut, password } = await c.req.json<{ rut: string, password: string }>();
 
@@ -184,57 +154,87 @@ app.post('/login', async (c) => {
     return c.json({ error: 'RUT y contraseña son requeridos' }, 400);
   }
 
-  // 1. Buscar al PACIENTE por RUT
+  // Buscamos al paciente y traemos los datos que el frontend necesita
   const paciente = await c.env.base_de_usuarios.prepare(
-    "SELECT rut, password_hash FROM paciente WHERE rut = ?"
-  )
-    .bind(rut)
-    .first<{ rut: string, password_hash: string }>(); // Solo traemos lo necesario
+    "SELECT rut, nombrePaciente, password_hash FROM paciente WHERE rut = ?"
+  ).bind(rut).first<{ rut: string, nombrePaciente: string, password_hash: string }>();
 
   if (!paciente) {
     return c.json({ error: 'Credenciales inválidas (usuario)' }, 401); 
   }
 
-  // 2. Verificar la contraseña
   const isValidPassword = await verifyPassword(password, paciente.password_hash);
-
   if (!isValidPassword) {
     return c.json({ error: 'Credenciales inválidas (contraseña)' }, 401);
   }
 
-  // 3. Si es válido, crear un token JWT
   const payload: MyJWTPayload = {
-    sub: paciente.rut, // El "Subject" sigue siendo el RUT
+    sub: paciente.rut, 
     iat: Math.floor(Date.now() / 1000), 
-    exp: Math.floor(Date.now() / 1000) + (60 * 60 * 24), // Expira en 24 horas
+    exp: Math.floor(Date.now() / 1000) + (60 * 60 * 24),
   };
-
   const token = await sign(payload, c.env.JWT_SECRET);
 
+  // Devolvemos el token Y el objeto 'user'
   return c.json({
     message: 'Login exitoso',
-    token: token
+    token: token,
+    user: {
+      rut: paciente.rut,
+      nombrePaciente: paciente.nombrePaciente
+      // Agrega aquí cualquier otro dato que el frontend necesite
+    }
   });
 });
 
-// --- RUTAS PRIVADAS (Requieren Token) ---
-// (Tu ruta /api/profile sigue funcionando igual, 
-//  pero ahora consulta la tabla 'paciente' en lugar de 'users')
-// ... (Asegúrate de cambiar 'c.env.DB' a 'c.env.base_de_usuarios' también en /api/profile)
+// --- NUEVAS RUTAS PÚBLICAS ---
+// Para poblar los dropdowns del frontend
+
+app.get('/generos', async (c) => {
+  try {
+    const { results } = await c.env.base_de_usuarios.prepare("SELECT * FROM genero").all();
+    return c.json(results);
+  } catch (e: any) {
+    return c.json({ error: 'Error al obtener géneros', details: e.message }, 500);
+  }
+});
+
+app.get('/especialidades', async (c) => {
+  try {
+    const { results } = await c.env.base_de_usuarios.prepare("SELECT * FROM especialidad").all();
+    return c.json(results);
+  } catch (e: any) {
+    return c.json({ error: 'Error al obtener especialidades', details: e.message }, 500);
+  }
+});
+
+app.get('/medicos', async (c) => {
+  try {
+    // Opcional: filtrar por especialidad
+    // ej: /medicos?especialidad=1
+    const { especialidad } = c.req.query();
+    let query = "SELECT * FROM medico";
+    if (especialidad) {
+      query = `SELECT * FROM medico WHERE idEspecialidad = ${parseInt(especialidad)}`;
+    }
+    const { results } = await c.env.base_de_usuarios.prepare(query).all();
+    return c.json(results);
+  } catch (e: any) {
+    return c.json({ error: 'Error al obtener médicos', details: e.message }, 500);
+  }
+});
+
 
 // --- RUTAS PRIVADAS (Requieren Token) ---
-// (Esta parte usa la lógica correcta de bearerAuth)
 
+// 1. Middleware de autenticación
+// (Sin cambios)
 app.use(
   '/api/*',
   bearerAuth({
     verifyToken: async (token: string, c: Context<Env>) => {
       try {
-        // --- CORRECCIÓN 2: Usamos nuestro tipo 'MyJWTPayload' ---
-        // Le decimos a 'verify' que esperamos un payload con esa forma.
         const payload = await verify(token, c.env.JWT_SECRET) as MyJWTPayload;
-        // --- Fin Corrección 2 ---
-
         if (payload && payload.sub) {
           c.set('jwtPayload', payload);
           return true;
@@ -247,19 +247,118 @@ app.use(
   })
 );
 
-// Esta ruta funciona porque 'c.var.jwtPayload' está bien tipado
+// 2. Ruta de Perfil (Actualizada a tabla 'paciente')
 app.get('/api/profile', async (c) => {
   const payload = c.var.jwtPayload;
-  const rut = payload.sub; // TypeScript sabe que 'sub' existe
+  const rut = payload.sub;
 
-  const user = await c.env.base_de_usuarios.prepare("SELECT rut, nombrePaciente, fechaNacimiento, idGenero, mail, telefono FROM paciente WHERE rut = ?")
-    .bind(rut)
-    .first();
+  // Busca en la tabla 'paciente'
+  const user = await c.env.base_de_usuarios.prepare(
+    "SELECT rut, nombrePaciente, fechaNacimiento, idGenero, mail, telefono FROM paciente WHERE rut = ?"
+  ).bind(rut).first();
 
-  return c.json({
-    message: `Hola! Esta es tu información de perfil (protegida).`,
-    user: user
-  });
+  if (user) {
+    return c.json(user);
+  } else {
+    return c.json({ error: 'Usuario no encontrado' }, 404);
+  }
 });
+
+// --- NUEVA RUTA: CHAT "IA" ---
+// Replicamos la lógica "falsa" del frontend, pero en el backend
+// para que pueda interactuar con la base de datos.
+app.post('/api/chat', async (c) => {
+  const { prompt } = await c.req.json<{ prompt: string }>();
+  const payload = c.var.jwtPayload;
+  const rutPaciente = payload.sub;
+
+  const p = prompt.toLowerCase();
+  let aiResponse = "";
+  let isAppointment = false;
+  let newAppointment: any = {};
+
+  if (p.includes('citas') || p.includes('horas') || p.includes('hola')) {
+      aiResponse = "Entiendo. Para poder reservarte una hora, necesito saber qué especialidad buscas (ej. **Odontología**, **Pediatría**, **Cardiología**) y si tienes alguna preferencia de día o doctor.";
+  } else if (p.includes('dolor') || p.includes('sintomas') || p.includes('síntomas')) {
+      aiResponse = "Lamento que no te sientas bien. Para asistirte, por favor, dime la especialidad que necesitas o la **fecha y hora** exacta que buscas.";
+  
+  // Lógica de reserva "falsa"
+  } else if (p.includes('confirmar') || (p.includes('cardiologia') && (p.includes('martes') || p.includes('mañana')))) {
+      aiResponse = "¡**Reserva completada!** La hora con el **Dr. Smith** en **Cardiología** queda programada para el *15 de noviembre a las 11:00 AM*. Recibirás un recordatorio por correo.";
+      
+      // ¡Aquí conectamos con la BD!
+      isAppointment = true;
+      newAppointment = {
+        fechaHora: new Date('2025-11-15T11:00:00').toISOString(), // Fecha/hora de la cita
+        rut: rutPaciente,
+        idMedico: 2, // ID Fijo para "Dra. Ana López" (Cardiología)
+      };
+
+  } else if (p.includes('pediatria') || p.includes('cardiologia') || p.includes('odontologia') || p.includes('medicina general')) {
+      aiResponse = "Perfecto, ¿para cuándo te gustaría la cita? Estoy viendo horas disponibles para la próxima semana, *por ejemplo, el martes por la tarde*.";
+  } else {
+      aiResponse = "Para continuar, ¿me indicas la especialidad y si necesitas alguna fecha u horario específico?";
+  }
+
+  // Si se detectó una cita, la guardamos en la BD
+  if (isAppointment) {
+    try {
+      await c.env.base_de_usuarios.prepare(
+        "INSERT INTO consulta (fechaHora, rut, idMedico) VALUES (?, ?, ?)"
+      ).bind(newAppointment.fechaHora, newAppointment.rut, newAppointment.idMedico).run();
+    } catch (e: any) {
+      console.log("Error al guardar consulta:", e);
+      aiResponse = "Hubo un problema al guardar tu cita en la base de datos, pero la IA la ha registrado. (Error: " + e.message + ")";
+    }
+  }
+
+  return c.json({ role: 'ai', text: aiResponse, id: Date.now() });
+});
+
+// --- NUEVA RUTA: OBTENER CONSULTAS ---
+// Para la pestaña "Mis Reservas"
+app.get('/api/consultas', async (c) => {
+  const payload = c.var.jwtPayload;
+  const rut = payload.sub;
+
+  try {
+    // Query complejo para traer toda la info de la cita
+    const { results } = await c.env.base_de_usuarios.prepare(
+      `SELECT
+          c.fechaHora,
+          c.rut,
+          m.nombreMedico,
+          e.especialidad
+       FROM consulta c
+       JOIN medico m ON c.idMedico = m.idMedico
+       JOIN especialidad e ON m.idEspecialidad = e.idEspecialidad
+       WHERE c.rut = ?
+       ORDER BY c.fechaHora DESC`
+    ).bind(rut).all();
+    
+    // Mapeamos los resultados al formato que el frontend espera
+    const now = new Date();
+    const appointments = results.map((row: any) => {
+      const apptDate = new Date(row.fechaHora);
+      const isPast = apptDate < now;
+      return {
+        id: row.fechaHora, // Usamos la fechaHora como ID único
+        specialty: row.especialidad,
+        doctor: row.nombreMedico,
+        date: apptDate.toLocaleDateString('es-CL', { day: '2-digit', month: 'long' }),
+        time: apptDate.toLocaleTimeString('es-CL', { hour: '2-digit', minute: '2-digit' }),
+        status: isPast ? 'Completada' : 'Confirmada',
+        isPast: isPast,
+      };
+    });
+
+    return c.json(appointments);
+
+  } catch (e: any) {
+    console.log("Error al obtener consultas:", e);
+    return c.json({ error: 'Error al obtener consultas', details: e.message }, 500);
+  }
+});
+
 
 export default app
