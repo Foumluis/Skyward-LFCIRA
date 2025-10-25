@@ -20,7 +20,11 @@
 			"database_name": "base_de_usuarios",
 			"database_id": "25530129-841f-49cb-992f-44f9b9ecaf2a"
 		}
-	]
+		
+	],
+	"ai": {
+    "binding": "AI" // ¡Asegúrate que coincida con tu c.env.AI!
+  }
 	/**
 	 * Smart Placement
 	 * Docs: https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement
@@ -51,4 +55,6 @@
 	 * https://developers.cloudflare.com/workers/wrangler/configuration/#service-bindings
 	 */
 	// "services": [{ "binding": "MY_SERVICE", "service": "my-service" }]
+
+	
 }

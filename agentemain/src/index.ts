@@ -15,8 +15,10 @@ type MyJWTPayload = {
 // Tipos del Entorno (Bindings y Variables)
 type Env = {
   Bindings: {
-    base_de_usuarios: D1Database;
-    JWT_SECRET: string;
+    base_de_usuarios: D1Database; // Base de datos D1
+    JWT_SECRET: string; // Clave secreta para JWT
+    AI: Ai; // Binding para el servicio de IA
+    ELEVENLABS_API_KEY: string; // Clave API para ElevenLabs
   },
   Variables: {
     jwtPayload: MyJWTPayload
@@ -267,52 +269,201 @@ app.get('/api/profile', async (c) => {
 // --- NUEVA RUTA: CHAT "IA" ---
 // Replicamos la lógica "falsa" del frontend, pero en el backend
 // para que pueda interactuar con la base de datos.
+// --- NUEVA RUTA: CHAT CON IA (Llama 3) ---
+
+// (Primero, pongamos la lógica de la BD en su propia función)
+// (Esta función está dentro de src/index.ts, antes de la ruta /api/chat)
+
+// (Reemplaza esta función completa)
+// (Esta función está en src/index.ts, reemplaza la versión anterior)
+
+// (Esta función está en src/index.ts, reemplaza la versión anterior)
+
+// (Esta función está en src/index.ts, reemplaza la versión anterior)
+
+async function crearConsultaEnBD(
+  c: Context<Env>, 
+  rutPaciente: string,  // <-- ¡AQUÍ ESTÁ LA CORRECCIÓN!
+  especialidadNombre: string, 
+  fechaHoraCita: Date
+) {
+  
+  // --- ¡LÓGICA MEJORADA! AHORA USA COINCIDENCIA EXACTA ---
+  
+  // 1. Buscar el ID de la especialidad en la base de datos
+  const especialidadResult = await c.env.base_de_usuarios.prepare(
+    "SELECT idEspecialidad FROM especialidad WHERE especialidad = ? LIMIT 1"
+  ).bind(especialidadNombre).first<{ idEspecialidad: number }>();
+
+  if (!especialidadResult) {
+    return `Lo siento, no pude encontrar la especialidad "${especialidadNombre}" en nuestra base de datos. ¿Podrías intentarlo de nuevo?`;
+  }
+
+  const idEspecialidad = especialidadResult.idEspecialidad;
+
+  // 2. Buscar un médico disponible para esa especialidad
+  const medicoResult = await c.env.base_de_usuarios.prepare(
+    "SELECT idMedico, nombreMedico FROM medico WHERE idEspecialidad = ? LIMIT 1"
+  ).bind(idEspecialidad).first<{ idMedico: number, nombreMedico: string }>();
+
+  if (!medicoResult) {
+    return `Lo siento, no tenemos médicos disponibles para la especialidad "${especialidadNombre}" en este momento.`;
+  }
+
+  const idMedico = medicoResult.idMedico;
+  const nombreMedico = medicoResult.nombreMedico;
+  // --- FIN LÓGICA MEJORADA ---
+
+  try {
+    await c.env.base_de_usuarios.prepare(
+      "INSERT INTO consulta (fechaHora, rut, idMedico) VALUES (?, ?, ?)"
+    )
+    .bind(fechaHoraCita.toISOString(), rutPaciente, idMedico) // <-- Esta línea ahora funciona
+    .run();
+    
+    const mensajeConfirmacion = `¡Reserva completada! Tu hora para ${especialidadNombre} con el/la ${nombreMedico} ha sido agendada para: ${fechaHoraCita.toLocaleString('es-CL', { timeZone: 'America/Santiago' })}.`;
+    
+    return mensajeConfirmacion;
+
+  } catch (e: any) {
+    console.log("Error al guardar consulta:", e);
+    if (e.message?.includes('UNIQUE constraint failed')) {
+        return `Lo siento, esa hora exacta (${fechaHoraCita.toLocaleString('es-CL', { timeZone: 'America/Santiago' })}) con ${nombreMedico} ya está tomada. Por favor, intenta con otra.`;
+    }
+    return `Lo siento, detecté tu intención de agendar para ${especialidadNombre}, pero ocurrió un error al guardarla en la base de datos: ${e.message}`;
+  }
+}
+
 app.post('/api/chat', async (c) => {
-  const { prompt } = await c.req.json<{ prompt: string }>();
+  const { prompt, history } = await c.req.json<{ prompt: string, history: { role: string, text: string }[] }>();
   const payload = c.var.jwtPayload;
   const rutPaciente = payload.sub;
 
-  const p = prompt.toLowerCase();
-  let aiResponse = "";
-  let isAppointment = false;
-  let newAppointment: any = {};
-
-  if (p.includes('citas') || p.includes('horas') || p.includes('hola')) {
-      aiResponse = "Entiendo. Para poder reservarte una hora, necesito saber qué especialidad buscas (ej. **Odontología**, **Pediatría**, **Cardiología**) y si tienes alguna preferencia de día o doctor.";
-  } else if (p.includes('dolor') || p.includes('sintomas') || p.includes('síntomas')) {
-      aiResponse = "Lamento que no te sientas bien. Para asistirte, por favor, dime la especialidad que necesitas o la **fecha y hora** exacta que buscas.";
+  // (Obtenemos la lista de especialidades...)
+  const { results: specialties } = await c.env.base_de_usuarios.prepare(
+    "SELECT especialidad FROM especialidad"
+  ).all<{ especialidad: string }>();
+  const specialtyList = specialties.map(s => s.especialidad).join(", ");
   
-  // Lógica de reserva "falsa"
-  } else if (p.includes('confirmar') || (p.includes('cardiologia') && (p.includes('martes') || p.includes('mañana')))) {
-      aiResponse = "¡**Reserva completada!** La hora con el **Dr. Smith** en **Cardiología** queda programada para el *15 de noviembre a las 11:00 AM*. Recibirás un recordatorio por correo.";
-      
-      // ¡Aquí conectamos con la BD!
-      isAppointment = true;
-      newAppointment = {
-        fechaHora: new Date('2025-11-15T11:00:00').toISOString(), // Fecha/hora de la cita
-        rut: rutPaciente,
-        idMedico: 2, // ID Fijo para "Dra. Ana López" (Cardiología)
-      };
+  const today = new Date().toLocaleDateString('es-CL', { timeZone: 'America/Santiago' });
 
-  } else if (p.includes('pediatria') || p.includes('cardiologia') || p.includes('odontologia') || p.includes('medicina general')) {
-      aiResponse = "Perfecto, ¿para cuándo te gustaría la cita? Estoy viendo horas disponibles para la próxima semana, *por ejemplo, el martes por la tarde*.";
-  } else {
-      aiResponse = "Para continuar, ¿me indicas la especialidad y si necesitas alguna fecha u horario específico?";
+  // (El System Prompt sigue siendo el mismo)
+  const systemPrompt = `Eres un extractor de datos. Tu única tarea es analizar la solicitud del usuario y devolver un objeto JSON.
+  La fecha de HOY es ${today} (formato DD-MM-YYYY).
+  Las ÚNICAS especialidades disponibles son: [${specialtyList}].
+  
+  Tu respuesta DEBE contener un bloque de JSON envuelto en etiquetas <json> y </json>.
+  
+  Ejemplo de respuesta:
+  <json>
+  {
+    "accion": "string", // "hablar" o "agendar"
+    "especialidad": "string|null",
+    "fecha_iso": "string|null" // (Formato YYYY-MM-DDTHH:MM:SS)
   }
+  </json>
+  
+  --- REGLAS ESTRICTAS DE EXTRACCIÓN ---
+  // (Todas tus reglas 1-4 van aquí...)
+  `;
 
-  // Si se detectó una cita, la guardamos en la BD
-  if (isAppointment) {
-    try {
-      await c.env.base_de_usuarios.prepare(
-        "INSERT INTO consulta (fechaHora, rut, idMedico) VALUES (?, ?, ?)"
-      ).bind(newAppointment.fechaHora, newAppointment.rut, newAppointment.idMedico).run();
-    } catch (e: any) {
-      console.log("Error al guardar consulta:", e);
-      aiResponse = "Hubo un problema al guardar tu cita en la base de datos, pero la IA la ha registrado. (Error: " + e.message + ")";
+  const messages = [
+    { role: 'system', content: systemPrompt },
+    ...history.map(msg => ({
+      role: msg.role === 'ai' ? 'assistant' : 'user',
+      content: msg.text
+    })),
+    { role: 'user', content: prompt }
+  ];
+  
+  try {
+    const aiResponse: any = await c.env.AI.run(
+      '@cf/meta/llama-3.2-3b-instruct',
+      { messages } // Sin 'response_format'
+    );
+    
+    let iaJSON: any;
+    let textoRespuestaFinal: string = "";
+
+    // (Lógica robusta para buscar el JSON...)
+    const jsonMatch = aiResponse.response.match(/<json>([\s\S]*?)<\/json>/);
+
+    if (jsonMatch && jsonMatch[1]) {
+      try {
+        iaJSON = JSON.parse(jsonMatch[1]);
+      } catch (e: any) {
+        console.error("Llama 3 envió JSON malformado:", jsonMatch[1], e);
+        throw new Error("Llama 3 generó una respuesta inválida.");
+      }
+    } else {
+      console.error("Llama 3 no devolvió las etiquetas <json>.");
+      throw new Error("Llama 3 no siguió las instrucciones de formato.");
     }
-  }
 
-  return c.json({ role: 'ai', text: aiResponse, id: Date.now() });
+    // --- LÓGICA DE RESPUESTA DE TYPESCRIPT ---
+    if (iaJSON.accion === 'agendar' && iaJSON.especialidad && iaJSON.fecha_iso) {
+      
+      console.log(`IA detectó agendamiento completo: ${iaJSON.especialidad}, ${iaJSON.fecha_iso}`);
+      
+      // --- ¡AQUÍ ESTÁ LA CORRECCIÓN INTELIGENTE! ---
+      // Llama 3 es inconsistente. A veces envía YYYY-MM-DD, a veces DD-MM-YYYY.
+      
+      const parts = iaJSON.fecha_iso.split('T');
+      if (parts.length < 2) throw new Error(`Fecha inválida, falta 'T': ${iaJSON.fecha_iso}`);
+      
+      const dateParts = parts[0].split('-');
+      if (dateParts.length < 3) throw new Error(`Fecha inválida, falta '-': ${iaJSON.fecha_iso}`);
+
+      let isoDateString = "";
+      
+      if (dateParts[0].length === 4) {
+        // Formato correcto (YYYY-MM-DD), usar tal cual
+        console.log("Formato de fecha detectado: YYYY-MM-DD (Correcto)");
+        isoDateString = iaJSON.fecha_iso;
+      } else if (dateParts[2].length === 4) {
+        // Formato inverso (DD-MM-YYYY), voltear
+        console.log("Formato de fecha detectado: DD-MM-YYYY (Invirtiendo)");
+        isoDateString = `${dateParts[2]}-${dateParts[1]}-${dateParts[0]}T${parts[1]}`;
+      } else {
+        // Formato desconocido
+        throw new Error(`Llama 3 devolvió un formato de fecha desconocido: ${iaJSON.fecha_iso}`);
+      }
+      
+      // Ahora 'new Date()' funcionará
+      const fechaConTimezone = new Date(isoDateString + "-03:00");
+      // --- FIN DE LA CORRECCIÓN ---
+
+      if (isNaN(fechaConTimezone.getTime())) {
+         // Si la fecha *aún así* es inválida
+         throw new Error(`La fecha procesada (${isoDateString}) es inválida.`);
+      }
+
+      textoRespuestaFinal = await crearConsultaEnBD(
+        c, 
+        rutPaciente, 
+        iaJSON.especialidad, 
+        fechaConTimezone
+      );
+    
+    } else if (iaJSON.accion === 'hablar') {
+      // (Lógica para "hablar" sin cambios...)
+      if (iaJSON.especialidad && !iaJSON.fecha_iso) {
+        textoRespuestaFinal = `¡Perfecto! ¿Para qué fecha y hora te gustaría agendar en ${iaJSON.especialidad}?`;
+      } else if (!iaJSON.especialidad && iaJSON.fecha_iso) {
+        textoRespuestaFinal = `¡Claro! ¿Para qué especialidad necesitas la hora? (Ej: ${specialtyList})`;
+      } else {
+        textoRespuestaFinal = "¡Hola! Soy tu asistente. ¿Qué especialidad y fecha buscas?";
+      }
+    } else {
+      textoRespuestaFinal = "No estoy seguro de cómo ayudarte con eso. ¿Podrías reformular tu solicitud?";
+    }
+    
+    return c.json({ role: 'ai', text: textoRespuestaFinal, id: Date.now() });
+
+  } catch (e: any) {
+    console.error("Error crítico llamando a la IA:", e);
+    return c.json({ role: 'ai', text: `Lo siento, mi cerebro de IA tuvo un error: ${e.message}`, id: Date.now() });
+  }
 });
 
 // --- NUEVA RUTA: OBTENER CONSULTAS ---
@@ -337,22 +488,39 @@ app.get('/api/consultas', async (c) => {
     ).bind(rut).all();
     
     // Mapeamos los resultados al formato que el frontend espera
+// ... dentro de app.get('/api/consultas', ...)
+
     const now = new Date();
     const appointments = results.map((row: any) => {
       const apptDate = new Date(row.fechaHora);
-      const isPast = apptDate < now;
+      
+      // --- ¡CAMBIO! ---
+      // Damos 1 hora (3,600,000 ms) de gracia.
+      // Una cita solo es "pasada" si terminó hace más de una hora.
+      const isPast = apptDate.getTime() < (now.getTime() - 3600000);
+      // --- FIN DEL CAMBIO ---
+
       return {
-        id: row.fechaHora, // Usamos la fechaHora como ID único
+        id: row.fechaHora, 
         specialty: row.especialidad,
         doctor: row.nombreMedico,
-        date: apptDate.toLocaleDateString('es-CL', { day: '2-digit', month: 'long' }),
-        time: apptDate.toLocaleTimeString('es-CL', { hour: '2-digit', minute: '2-digit' }),
-        status: isPast ? 'Completada' : 'Confirmada',
+        date: apptDate.toLocaleDateString('es-CL', { 
+            day: '2-digit', 
+            month: 'long',
+            timeZone: 'America/Santiago' // <--- AÑADIR ESTO
+        }),
+        time: apptDate.toLocaleTimeString('es-CL', { 
+            hour: '2-digit', 
+            minute: '2-digit',
+            timeZone: 'America/Santiago' // <--- AÑADIR ESTO
+        }),
+        status: isPast ? 'Completada' : 'Confirmada', // <-- Esto ahora dirá "Confirmada"
         isPast: isPast,
       };
     });
 
     return c.json(appointments);
+// ...
 
   } catch (e: any) {
     console.log("Error al obtener consultas:", e);
@@ -360,5 +528,48 @@ app.get('/api/consultas', async (c) => {
   }
 });
 
+// --- NUEVA RUTA: TEXT-TO-SPEECH (ELEVENLABS) ---
+// Esta ruta NO está protegida, para que sea rápida.
+app.post('/tts', async (c) => {
+  const { text } = await c.req.json<{ text: string }>();
+
+  // ID de voz de ejemplo (Rachel). Puedes cambiarla por la que prefieras.
+  const voiceId = "21m00Tcm4TlvDq8ikWAM"; 
+
+  try {
+    const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
+      method: 'POST',
+      headers: {
+        'Accept': 'audio/mpeg',
+        'Content-Type': 'application/json',
+        'xi-api-key': c.env.ELEVENLABS_API_KEY
+      },
+      body: JSON.stringify({
+        text: text,
+        model_id: 'eleven_multilingual_v2', // Buen modelo para español
+        voice_settings: {
+          stability: 0.5,
+          similarity_boost: 0.75
+        }
+      })
+    });
+
+    if (!response.ok) {
+      console.error("Error de ElevenLabs:", await response.text());
+      return c.json({ error: 'Failed to generate speech' }, 500);
+    }
+
+    // Devolvemos el audio directamente al frontend
+    return new Response(response.body, {
+      headers: { 
+        'Content-Type': 'audio/mpeg'
+      }
+    });
+
+  } catch (e: any) {
+    console.error("Error en /api/tts:", e);
+    return c.json({ error: e.message }, 500);
+  }
+});
 
 export default app

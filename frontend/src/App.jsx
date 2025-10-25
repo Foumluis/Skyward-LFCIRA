@@ -440,9 +440,46 @@ const Navbar = ({ view, setView, onLogout }) => {
 
 // 3. ChatView
 // --- CAMBIO: Conectado a la API. Se pasa 'token' ---
+// (Dentro de App.jsx)
+
+// --- 1. ChatBubble (Componente extraído) ---
+// Es una mejor práctica definir componentes separados fuera de otros componentes.
+// Esto soluciona posibles problemas de 'scope' de ESLint.
+const ChatBubble = ({ message }) => {
+    const isUser = message.role === 'user';
+    const bubbleClasses = isUser 
+        ? 'bg-blue-100 text-gray-700 rounded-br-none' 
+        : 'bg-white border-l-4 border-blue-600 text-gray-800 rounded-tl-none shadow-sm';
+
+    const formatText = (text) => {
+        let formatted = text
+            .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+            .replace(/\*(.*?)\*/g, '<em>$1</em>')
+            .replace(/\n/g, '<br>');
+
+        if (text === '...') {
+            formatted = `<span class="animate-pulse">.</span><span class="animate-pulse delay-100">.</span><span class="animate-pulse delay-200">.</span>`;
+        }
+
+        return { __html: formatted };
+    };
+
+    return (
+        <div className={`flex mb-4 ${isUser ? 'justify-end' : 'justify-start'}`}>
+            <div className={`max-w-xs md:max-w-md lg:max-w-lg p-4 rounded-xl shadow-lg transition duration-300 ${bubbleClasses}`}>
+                <div dangerouslySetInnerHTML={formatText(message.text)} />
+            </div>
+        </div>
+    );
+};
+
+
+// --- 2. ChatView (Componente Principal Corregido) ---
 const ChatView = ({ chatHistory, setChatHistory, isProcessing, setIsProcessing, setAppointments, token }) => {
     const userInputRef = useRef(null);
     const chatWindowRef = useRef(null);
+    const [isListening, setIsListening] = useState(false);
+    const recognitionRef = useRef(null);
 
     useEffect(() => {
         if (chatWindowRef.current) {
@@ -453,9 +490,44 @@ const ChatView = ({ chatHistory, setChatHistory, isProcessing, setIsProcessing, 
         }
     }, [chatHistory, isProcessing]);
 
-    // --- CAMBIO: Eliminada la función 'generateMockResponse' ---
+    // --- FUNCIÓN DE AUDIO (MÁS ROBUSTA) ---
+    // Maneja errores de 'autoplay' para que la app no se congele.
+    const playAudioAndShowText = async (text) => {
+        try {
+            const audioResponse = await fetch(`${API_URL}/tts`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: text })
+            });
 
-    // --- CAMBIO: sendMessage ahora llama a POST /api/chat ---
+            if (!audioResponse.ok) throw new Error('Falló al buscar el audio');
+
+            const audioBlob = await audioResponse.blob();
+            const audioUrl = URL.createObjectURL(audioBlob);
+            const audio = new Audio(audioUrl);
+
+            // Esperamos a que el audio termine o falle
+            await new Promise((resolve, reject) => {
+                audio.onended = resolve;
+                audio.onerror = reject; // Manejar error de carga/reproducción
+                
+                // Intentamos reproducir. Si falla (ej. Autoplay bloqueado),
+                // lo capturamos y resolvemos para que el chat continúe.
+                audio.play().catch(error => {
+                    console.warn("Autoplay de audio falló (esto es normal si no se ha interactuado):", error);
+                    resolve(); // Resuelve la promesa para que el texto aparezca
+                });
+            });
+            
+            URL.revokeObjectURL(audioUrl);
+
+        } catch (error) {
+            console.error("Error al reproducir audio (ElevenLabs):", error);
+            // Si el audio falla, no hay problema, el texto se mostrará igualmente.
+        }
+    };
+
+    // --- FUNCIÓN DE ENVIAR MENSAJE ---
     const sendMessage = async (e) => {
         if (e) e.preventDefault();
         
@@ -467,80 +539,108 @@ const ChatView = ({ chatHistory, setChatHistory, isProcessing, setIsProcessing, 
         setIsProcessing(true);
 
         const newUserMessage = { role: 'user', text: prompt, id: Date.now() };
-        setChatHistory(prev => [...prev, newUserMessage]);
+        const currentChatHistory = [...chatHistory, newUserMessage];
+        setChatHistory(currentChatHistory);
         
         const loadingElement = { role: 'ai', text: '...', id: 'loading' };
         setChatHistory(prev => [...prev, loadingElement]);
 
+        let textoRespuestaFinal = ""; 
+
         try {
-            // Llamada real a la API del backend
             const response = await fetch(`${API_URL}/api/chat`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    // Enviamos el token para autenticación
                     'Authorization': `Bearer ${token}` 
                 },
-                body: JSON.stringify({ prompt: prompt })
+                body: JSON.stringify({ 
+                  prompt: prompt, 
+                  history: currentChatHistory
+                })
             });
 
             if (!response.ok) {
-                throw new Error('Error en la respuesta de la IA');
+                const errData = await response.json();
+                throw new Error(errData.error || 'Error en la respuesta de la IA');
             }
 
-            const aiResponse = await response.json(); // { role: 'ai', text: '...', id: ... }
-
-            setChatHistory(prev => prev.filter(msg => msg.id !== 'loading'));
-            setChatHistory(prev => [...prev, aiResponse]);
-
-            // Si la respuesta indica una reserva, actualizamos la lista
-            // (El backend ahora nos dice si se completó una reserva)
-            if (aiResponse.text.includes('Reserva completada')) {
-                // Le pedimos al componente padre que recargue las citas
-                setAppointments(null); // Esto forzará un 'refresh' en App.jsx
-            }
-
-        } catch (error) {
-            console.error("Error:", error);
-            setChatHistory(prev => prev.filter(msg => msg.id !== 'loading'));
-            setChatHistory(prev => [...prev, { role: 'ai', text: 'Lo siento, hubo un error. Por favor, inténtalo de nuevo.', id: Date.now() + 2 }]);
-        } finally {
-            setIsProcessing(false);
+            const aiResponse = await response.json(); 
+            textoRespuestaFinal = aiResponse.text; 
+            if (textoRespuestaFinal.includes('Reserva completada')) {
+            // Le decimos al componente 'App' que recargue las citas
+            setAppointments(null); // Esto dispara el useEffect en App.jsx
         }
+
+        } catch (e) { // <-- ¡Corregido! Sin ':any'
+            console.error("Error llamando a la IA:", e);
+            textoRespuestaFinal = `Lo siento, mi cerebro de IA tuvo un error: ${e.message}`;
+        }
+
+        // --- Lógica de reproducción ---
+        setChatHistory(prev => prev.filter(msg => msg.id !== 'loading'));
+        
+        // 1. Reproducimos el audio Y esperamos
+        await playAudioAndShowText(textoRespuestaFinal);
+        
+        // 2. Mostramos el texto
+        setChatHistory(prev => [...prev, { role: 'ai', text: textoRespuestaFinal, id: Date.now() }]);
+        
+        // 3. Reactivamos el input
+        setIsProcessing(false); 
     };
 
-    const ChatBubble = ({ message }) => {
-        // ... (código de ChatBubble sin cambios) ...
-        const isUser = message.role === 'user';
-        const bubbleClasses = isUser 
-            ? 'bg-blue-100 text-gray-700 rounded-br-none' 
-            : 'bg-white border-l-4 border-blue-600 text-gray-800 rounded-tl-none shadow-sm';
-
-        const formatText = (text) => {
-            let formatted = text
-                .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-                .replace(/\*(.*?)\*/g, '<em>$1</em>')
-                .replace(/\n/g, '<br>');
-
-            if (text === '...') {
-                formatted = `<span class="animate-pulse">.</span><span class="animate-pulse delay-100">.</span><span class="animate-pulse delay-200">.</span>`;
+    // --- FUNCIÓN DE ESCUCHA (Corregida) ---
+    const handleListen = () => {
+        if (isListening) {
+            if (recognitionRef.current) {
+              recognitionRef.current.stop();
             }
+            setIsListening(false);
+            return;
+        }
 
-            return { __html: formatted };
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SpeechRecognition) {
+            alert("Lo siento, tu navegador no soporta el reconocimiento de voz.");
+            return;
+        }
+
+        const recognition = new SpeechRecognition();
+        recognition.lang = 'es-CL';
+        recognition.interimResults = false; 
+        recognitionRef.current = recognition;
+
+        recognition.onstart = () => {
+            setIsListening(true);
         };
 
-        return (
-            <div className={`flex mb-4 ${isUser ? 'justify-end' : 'justify-start'}`}>
-                <div className={`max-w-xs md:max-w-md lg:max-w-lg p-4 rounded-xl shadow-lg transition duration-300 ${bubbleClasses}`}>
-                    <div dangerouslySetInnerHTML={formatText(message.text)} />
-                </div>
-            </div>
-        );
+        recognition.onend = () => {
+            setIsListening(false);
+        };
+
+        recognition.onerror = (event) => {
+            console.error("Error de reconocimiento de voz:", event.error);
+            setIsListening(false);
+        };
+
+        recognition.onresult = (event) => {
+            const transcript = event.results[0][0].transcript;
+            if (userInputRef.current) {
+                userInputRef.current.value = transcript; // Pone el texto en el input
+                userInputRef.current.focus(); // Enfoca el input para que el usuario revise
+            }
+            // NOTA: Quitamos el 'sendMessage()' automático.
+            // Es mejor que el usuario revise y presione "Enviar".
+            sendMessage();
+        };
+
+        recognition.start();
     };
 
+    // --- JSX RETURN (Corregido) ---
     return (
         <div className="flex-grow flex flex-col h-full">
-            {/* ... (main y footer del chat sin cambios) ... */}
             <main ref={chatWindowRef} className="flex-grow p-4 md:p-6 overflow-y-auto" style={{ minHeight: 0 }}>
                 {chatHistory.map((msg) => (
                     <ChatBubble key={msg.id} message={msg} />
@@ -554,7 +654,9 @@ const ChatView = ({ chatHistory, setChatHistory, isProcessing, setIsProcessing, 
                         placeholder={isProcessing ? "Procesando respuesta..." : "Escribe tu necesidad de cita o pregunta aquí..."}
                         rows="1"
                         disabled={isProcessing}
-                        className="w-full resize-none p-4 pr-12 text-lg rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 shadow-md transition duration-150 border-gray-300 disabled:bg-gray-100"
+                        // --- ¡CLASE CORREGIDA! ---
+                        // Reemplazamos "...(resto de clases)" con las clases reales
+                        className="w-full resize-none p-4 pr-24 text-lg rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 shadow-md transition duration-150 border-gray-300 disabled:bg-gray-100"
                         onKeyDown={(e) => {
                             if (e.key === 'Enter' && !e.shiftKey) {
                                 e.preventDefault();
@@ -566,21 +668,39 @@ const ChatView = ({ chatHistory, setChatHistory, isProcessing, setIsProcessing, 
                             e.target.style.height = (e.target.scrollHeight) + 'px';
                         }}
                     />
-                    <button 
-                        onClick={sendMessage}
-                        disabled={isProcessing}
-                        className="absolute right-2 bg-blue-600 text-white p-2 rounded-lg hover:bg-blue-700 disabled:bg-gray-400 transition"
-                    >
-                        <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path>
-                        </svg>
-                    </button>
+                    <div className="absolute right-2 flex space-x-2">
+                        <button 
+                            onClick={sendMessage}
+                            disabled={isProcessing}
+                            className="bg-blue-600 text-white p-2 rounded-lg hover:bg-blue-700 disabled:bg-gray-400 transition"
+                        >
+                            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path>
+                            </svg>
+                        </button>
+                        
+                        <button
+                            onClick={handleListen} // <-- Esto ahora funcionará
+                            disabled={isProcessing}
+                            className={`p-2 rounded-lg transition ${
+                                isListening // <-- Esto ahora funcionará
+                                ? 'bg-red-500 text-white animate-pulse' 
+                                : 'bg-gray-300 text-gray-700 hover:bg-gray-400'
+                            }`}
+                        >
+                            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z"></path>
+                            </svg>
+                        </button>
+                    </div>
                 </div>
                 <p className="text-xs text-gray-400 mt-2 text-center">Tus interacciones son privadas y protegidas.</p>
             </footer>
         </div>
     );
 };
+
+// ... (El resto de tu App.jsx, como Appointments y App, sigue igual)
 
 // 4. Appointments
 // --- CAMBIO: Ahora recibe 'appointments' como prop, ya no las maneja localmente ---
@@ -758,12 +878,28 @@ const App = () => {
     }, [currentUser, token, appointments === null]); // Se ejecuta si 'appointments' se setea a null
 
     // --- CAMBIO: handleLogin ahora guarda el token ---
-    const handleLogin = (data) => {
-        // 'data' es { token, user } desde nuestro backend
-        setToken(data.token);
-        setCurrentUser(data.user);
-        localStorage.setItem('medicalToken', data.token);
-    };
+// (Dentro del componente 'App', en la función 'handleLogin')
+
+const handleLogin = (data) => {
+    // 'data' es { token, user } desde nuestro backend
+    setToken(data.token);
+    setCurrentUser(data.user);
+    localStorage.setItem('medicalToken', data.token);
+
+    // --- ¡AÑADE ESTO PARA ARREGLAR EL AUTOPLAY! ---
+    // Reproducimos un audio 'dummy' (vacío) muy corto.
+    // El navegador ve que el *clic* del login causó un 'play()',
+    // y "desbloquea" el audio para el resto de la sesión.
+    try {
+        const audio = new Audio("data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA");
+        audio.volume = 0.01; // Casi inaudible
+        // Añadimos un .catch() por si acaso
+        audio.play().catch(e => console.warn("Fallo al inicializar el audio (es normal):", e));
+    } catch (e) {
+        console.warn("Fallo al crear el audio dummy", e);
+    }
+    // --- FIN DEL ARREGLO ---
+};
 
     // --- CAMBIO: handleLogout limpia el token ---
     const handleLogout = () => {
