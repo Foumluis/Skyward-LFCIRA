@@ -6,7 +6,8 @@
   "main": "puppeteer-server.js",
   "scripts": {
     "start": "node puppeteer-server.js",
-    "dev": "nodemon puppeteer-server.js"
+    "dev": "nodemon puppeteer-server.js",
+    "postinstall": "node ./node_modules/puppeteer/install.mjs"
   },
   "keywords": [
     "puppeteer",
