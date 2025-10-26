@@ -72,12 +72,17 @@ export async function reservarHora({
 
   // ----- INICIO DE LA CORRECCIÓN -----
   // CONFIGURACIÓN PARA RENDER (PRODUCCIÓN)
+
+const chromePath = '/opt/render/.cache/puppeteer/chrome/linux-131.0.6778.204/chrome-linux64/chrome';
+  
+console.log(`[DEBUG] Usando path de Chrome: ${chromePath}`);
+
   const browser = await puppeteer.launch({
-    headless: headless ? 'new' : false, // Usa el nuevo modo headless
+    headless: 'new',
     
     // ESTA LÍNEA ES ESENCIAL para Render/producción
     // Le dice a Puppeteer que use el Chrome que descargó en node_modules
-    executablePath: puppeteer.executablePath(), 
+    executablePath: chromePath, 
     
     args: [
       '--no-sandbox',
@@ -86,7 +91,8 @@ export async function reservarHora({
       '--disable-accelerated-2d-canvas',
       '--no-first-run',
       '--no-zygote',
-      '--disable-gpu'
+      '--disable-gpu',
+      '--single-process'
     ],
     ignoreHTTPSErrors: true
     // El comentario original que tenías era la causa del error.
