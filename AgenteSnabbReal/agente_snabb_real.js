@@ -70,9 +70,15 @@ export async function reservarHora({
   console.log(`👨‍⚕️ Médico: ${medico || 'Cualquiera'}`);
   console.log(`${'='.repeat(60)}\n`);
 
-  // NUEVA CONFIGURACIÓN - Sin executablePath
+  // ----- INICIO DE LA CORRECCIÓN -----
+  // CONFIGURACIÓN PARA RENDER (PRODUCCIÓN)
   const browser = await puppeteer.launch({
     headless: headless ? 'new' : false, // Usa el nuevo modo headless
+    
+    // ESTA LÍNEA ES ESENCIAL para Render/producción
+    // Le dice a Puppeteer que use el Chrome que descargó en node_modules
+    executablePath: puppeteer.executablePath(), 
+    
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -83,8 +89,10 @@ export async function reservarHora({
       '--disable-gpu'
     ],
     ignoreHTTPSErrors: true
-    // NO incluyas executablePath - Puppeteer usará el Chrome que descargó
+    // El comentario original que tenías era la causa del error.
   });
+  // ----- FIN DE LA CORRECCIÓN -----
+
   const page = await browser.newPage();
   await page.setViewport({ width: 1920, height: 1080 });
   page.setDefaultTimeout(25000);
@@ -164,7 +172,7 @@ export async function reservarHora({
 
     console.log("✏️ Escribiendo número de documento...");
     await sleep(500);
-    
+
     const inputCandidates = [
       "input[name='documentNumber']",
       "#rut",
@@ -274,3 +282,4 @@ export async function reservarHora({
     throw e;
   }
 }
+// LA LLAVE EXTRA QUE ESTABA AQUÍ FUE ELIMINADA
