@@ -73,29 +73,25 @@ export async function reservarHora({
   // ----- INICIO DE LA CORRECCIÓN -----
   // CONFIGURACIÓN PARA RENDER (PRODUCCIÓN)
 
-const chromePath = '/opt/render/.cache/puppeteer/chrome/linux-131.0.6778.204/chrome-linux64/chrome';
+const chromePath = puppeteer.executablePath();
   
-console.log(`[DEBUG] Usando path de Chrome: ${chromePath}`);
+  console.log(`[DEBUG] Buscando Chrome con executablePath(). Path: ${chromePath}`);
 
   const browser = await puppeteer.launch({
-    headless: 'new',
+    headless: 'new', // Modo headless nuevo
     
-    // ESTA LÍNEA ES ESENCIAL para Render/producción
-    // Le dice a Puppeteer que use el Chrome que descargó en node_modules
+    // Volvemos a usar el método dinámico
     executablePath: chromePath, 
     
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
-      '--disable-accelerated-2d-canvas',
-      '--no-first-run',
-      '--no-zygote',
       '--disable-gpu',
+      '--no-zygote',
       '--single-process'
     ],
     ignoreHTTPSErrors: true
-    // El comentario original que tenías era la causa del error.
   });
   // ----- FIN DE LA CORRECCIÓN -----
 
