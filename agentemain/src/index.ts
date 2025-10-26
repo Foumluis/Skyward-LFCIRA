@@ -2,12 +2,20 @@ import { Hono, Context } from 'hono';
 import { sign, verify } from 'hono/jwt';
 import { bearerAuth } from 'hono/bearer-auth';
 import { cors } from 'hono/cors';
+import { iniciarAgendamiento, continuarAgendamiento } from './agente_snabb_interactivo.js';
 
-// --- Definición de Tipos ---
+// --- TIPOS ---
 type MyJWTPayload = {
   sub: string;
   iat: number;
   exp: number;
+};
+
+type ChatResponse = {
+  message: string;
+  screenshot?: string | null;
+  options?: string[];
+  waitingFor?: string;
 };
 
 type Env = {
@@ -16,6 +24,7 @@ type Env = {
     JWT_SECRET: string;
     AI: Ai;
     ELEVENLABS_API_KEY: string;
+    MY_BROWSER: Fetcher;
   };
   Variables: {
     jwtPayload: MyJWTPayload;
@@ -24,10 +33,11 @@ type Env = {
 
 const app = new Hono<Env>();
 
-// --- Middleware de CORS ---
-app.use('*', cors());
+// --- ALMACENAMIENTO DE SESIONES DE PUPPETEER (en memoria) ---
+// En producción: usar Durable Objects o Redis
+const puppeteerSessions = new Map<string, any>();
 
-// --- Lógica de Contraseñas ---
+// --- FUNCIONES DE CONTRASEÑA (sin cambios) ---
 async function hashPassword(password: string) {
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const enc = new TextEncoder();
@@ -69,11 +79,14 @@ async function verifyPassword(password: string, hash: string) {
   }
 }
 
-// --- RUTAS PÚBLICAS (Login / Registro / Datos) ---
+// --- CORS ---
+app.use('*', cors());
+
+// --- RUTAS PÚBLICAS (sin cambios) ---
 app.post('/register', async (c) => {
   const { rut, nombrePaciente, fechaNacimiento, idGenero, mail, telefono, password } = await c.req.json<any>();
   if (!rut || !nombrePaciente || !fechaNacimiento || !idGenero || !telefono || !password) {
-    return c.json({ error: 'Faltan campos requeridos para el registro' }, 400);
+    return c.json({ error: 'Faltan campos requeridos' }, 400);
   }
   const passwordHash = await hashPassword(password);
   try {
@@ -81,26 +94,25 @@ app.post('/register', async (c) => {
       "INSERT INTO paciente (rut, nombrePaciente, fechaNacimiento, idGenero, mail, telefono, password_hash) VALUES (?, ?, ?, ?, ?, ?, ?)"
     ).bind(rut, nombrePaciente, fechaNacimiento, idGenero, mail || null, telefono, passwordHash).run();
     if (success) return c.json({ message: 'Paciente registrado con éxito' }, 201);
-    else return c.json({ error: 'No se pudo registrar al paciente' }, 500);
+    else return c.json({ error: 'No se pudo registrar' }, 500);
   } catch (e: any) {
-    console.log("Error capturado en /register:", e);
     if (e.message?.includes('UNIQUE constraint failed')) return c.json({ error: 'El RUT ya está registrado' }, 409);
-    return c.json({ error: 'Error interno del servidor', details: e.message }, 500);
+    return c.json({ error: 'Error interno', details: e.message }, 500);
   }
 });
 
 app.post('/login', async (c) => {
   const { rut, password } = await c.req.json<{ rut: string, password: string }>();
-  if (!rut || !password) return c.json({ error: 'RUT y contraseña son requeridos' }, 400);
+  if (!rut || !password) return c.json({ error: 'RUT y contraseña requeridos' }, 400);
   const paciente = await c.env.base_de_usuarios.prepare(
     "SELECT rut, nombrePaciente, password_hash FROM paciente WHERE rut = ?"
   ).bind(rut).first<{ rut: string, nombrePaciente: string, password_hash: string }>();
-  if (!paciente) return c.json({ error: 'Credenciales inválidas (usuario)' }, 401);
+  if (!paciente) return c.json({ error: 'Credenciales inválidas' }, 401);
   const isValidPassword = await verifyPassword(password, paciente.password_hash);
-  if (!isValidPassword) return c.json({ error: 'Credenciales inválidas (contraseña)' }, 401);
+  if (!isValidPassword) return c.json({ error: 'Credenciales inválidas' }, 401);
   const payload: MyJWTPayload = { sub: paciente.rut, iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + (60 * 60 * 24) };
   const token = await sign(payload, c.env.JWT_SECRET);
-  return c.json({ message: 'Login exitoso', token: token, user: { rut: paciente.rut, nombrePaciente: paciente.nombrePaciente } });
+  return c.json({ token, user: { rut: paciente.rut, nombrePaciente: paciente.nombrePaciente } });
 });
 
 app.get('/generos', async (c) => {
@@ -108,39 +120,19 @@ app.get('/generos', async (c) => {
     const { results } = await c.env.base_de_usuarios.prepare("SELECT * FROM genero").all();
     return c.json(results);
   } catch (e: any) {
-    console.error("Error en /generos:", e);
-    return c.json({ error: 'Error al obtener géneros', details: e.message }, 500);
+    return c.json({ error: 'Error al obtener géneros' }, 500);
   }
 });
 
 app.get('/especialidades', async (c) => {
- try {
+  try {
     const { results } = await c.env.base_de_usuarios.prepare("SELECT * FROM especialidad").all();
     return c.json(results);
   } catch (e: any) {
-    console.error("Error en /especialidades:", e);
-    return c.json({ error: 'Error al obtener especialidades', details: e.message }, 500);
+    return c.json({ error: 'Error al obtener especialidades' }, 500);
   }
 });
 
-app.get('/medicos', async (c) => {
- try {
-    const { especialidad } = c.req.query();
-    let query = "SELECT * FROM medico";
-    let bindings: (string | number)[] = [];
-    if (especialidad) {
-      query = `SELECT * FROM medico WHERE idEspecialidad = ?`;
-      bindings.push(parseInt(especialidad));
-    }
-    const { results } = await c.env.base_de_usuarios.prepare(query).bind(...bindings).all();
-    return c.json(results);
-  } catch (e: any) {
-    console.error("Error en /medicos:", e);
-    return c.json({ error: 'Error al obtener médicos', details: e.message }, 500);
-  }
-});
-
-// --- RUTA TTS (Pública) ---
 app.post('/tts', async (c) => {
   const { text } = await c.req.json<{ text: string }>();
   const voiceId = "21m00Tcm4TlvDq8ikWAM";
@@ -148,139 +140,79 @@ app.post('/tts', async (c) => {
     const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
       method: 'POST',
       headers: { 'Accept': 'audio/mpeg', 'Content-Type': 'application/json', 'xi-api-key': c.env.ELEVENLABS_API_KEY },
-      body: JSON.stringify({ text: text, model_id: 'eleven_multilingual_v2', voice_settings: { stability: 0.5, similarity_boost: 0.75 } })
+      body: JSON.stringify({ text, model_id: 'eleven_multilingual_v2', voice_settings: { stability: 0.5, similarity_boost: 0.75 } })
     });
-    if (!response.ok) {
-      console.error("Error de ElevenLabs:", await response.text());
-      return c.json({ error: 'Failed to generate speech' }, 500);
-    }
+    if (!response.ok) return c.json({ error: 'TTS failed' }, 500);
     return new Response(response.body, { headers: { 'Content-Type': 'audio/mpeg' } });
   } catch (e: any) {
-    console.error("Error en /tts:", e);
     return c.json({ error: e.message }, 500);
   }
 });
 
-// --- MIDDLEWARE DE AUTENTICACIÓN ---
-app.use(
-  '/api/*',
-  bearerAuth({
-    verifyToken: async (token: string, c: Context<Env>) => {
-      try {
-        const payload = await verify(token, c.env.JWT_SECRET) as MyJWTPayload;
-        if (payload && payload.sub) {
-          c.set('jwtPayload', payload);
-          return true;
-        }
-        return false;
-      } catch (e) {
-        return false;
+// --- MIDDLEWARE ---
+app.use('/api/*', bearerAuth({
+  verifyToken: async (token: string, c: Context<Env>) => {
+    try {
+      const payload = await verify(token, c.env.JWT_SECRET) as MyJWTPayload;
+      if (payload?.sub) {
+        c.set('jwtPayload', payload);
+        return true;
       }
+      return false;
+    } catch (e) {
+      return false;
     }
-  })
-);
-
-// --- RUTAS PRIVADAS (DESPUÉS DEL MIDDLEWARE) ---
-
-// RUTA BORRAR CITA
-app.delete('/api/consultas/:id', async (c) => {
-  console.log("!!! >>> DENTRO DE app.delete <<< !!!");
-  const idConsulta = c.req.param('id');
-  const payload = c.var.jwtPayload;
-  
-  if (!payload) {
-    console.error("DELETE Handler: Middleware falló, falta payload");
-    return c.json({ error: 'Autenticación fallida' }, 401);
   }
-  
-  const rutPaciente = payload.sub;
-  console.log(`Intentando borrar: idConsulta='${idConsulta}', rut='${rutPaciente}'`);
-  
+}));
+
+// --- RUTAS PRIVADAS EXISTENTES ---
+app.delete('/api/consultas/:id', async (c) => {
+  const idConsulta = c.req.param('id');
+  const rutPaciente = c.var.jwtPayload.sub;
   try {
     const { success } = await c.env.base_de_usuarios.prepare(
       "DELETE FROM consulta WHERE idConsulta = ? AND rut = ?"
     ).bind(idConsulta, rutPaciente).run();
-    
-    if (!success) {
-      console.log(`DELETE falló: No se encontró fila con idConsulta=${idConsulta} Y rut=${rutPaciente}`);
-      return c.json({ error: 'No se pudo borrar la cita. No se encontró o no tienes permiso.' }, 404);
-    }
-    
-    console.log(`DELETE exitoso para idConsulta=${idConsulta}, rut=${rutPaciente}`);
-    return c.json({ message: 'Cita borrada con éxito' });
+    if (!success) return c.json({ error: 'No se pudo borrar' }, 404);
+    return c.json({ message: 'Cita borrada' });
   } catch (e: any) {
-    console.error("Error crítico al borrar consulta:", e);
-    return c.json({ error: 'Error interno al borrar la cita', details: e.message }, 500);
+    return c.json({ error: 'Error al borrar', details: e.message }, 500);
   }
 });
 
-// RUTA MODIFICAR CITA (HORARIO)
 app.put('/api/consultas/:id', async (c) => {
-  console.log("!!! >>> DENTRO DE app.put <<< !!!");
   const idConsulta = c.req.param('id');
-  const payload = c.var.jwtPayload;
-  
-  if (!payload) {
-    console.error("PUT Handler: Middleware falló, falta payload");
-    return c.json({ error: 'Autenticación fallida' }, 401);
-  }
-  
-  const rutPaciente = payload.sub;
+  const rutPaciente = c.var.jwtPayload.sub;
   const { fecha_iso } = await c.req.json<{ fecha_iso: string }>();
+  if (!fecha_iso) return c.json({ error: 'Falta fecha_iso' }, 400);
   
-  if (!fecha_iso) {
-    return c.json({ error: 'Falta la nueva fecha (fecha_iso)' }, 400);
-  }
-
-  let fechaHoraCita: Date;
   try {
-    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(fecha_iso)) {
-      throw new Error('Formato fecha_iso esperado YYYY-MM-DDTHH:MM:SS');
-    }
     const fechaConTimezone = new Date(fecha_iso + "-03:00");
-    if (isNaN(fechaConTimezone.getTime())) {
-      throw new Error('Fecha inválida después de parsear');
-    }
-    fechaHoraCita = fechaConTimezone;
-  } catch (e: any) {
-    console.error("Error parseando fecha_iso:", fecha_iso, e);
-    return c.json({ error: `Formato de fecha inválido: ${e.message}` }, 400);
-  }
-
-  try {
+    if (isNaN(fechaConTimezone.getTime())) throw new Error('Fecha inválida');
+    
     const { success } = await c.env.base_de_usuarios.prepare(
       "UPDATE consulta SET fechaHora = ? WHERE idConsulta = ? AND rut = ?"
-    ).bind(fechaHoraCita.toISOString(), idConsulta, rutPaciente).run();
+    ).bind(fechaConTimezone.toISOString(), idConsulta, rutPaciente).run();
     
-    if (!success) {
-      return c.json({ error: 'No se pudo modificar la cita. No se encontró o no tienes permiso.' }, 404);
-    }
-    
-    return c.json({ message: 'Cita modificada con éxito' });
+    if (!success) return c.json({ error: 'No se pudo modificar' }, 404);
+    return c.json({ message: 'Cita modificada' });
   } catch (e: any) {
-    console.error("Error al modificar consulta:", e);
-    if (e.message?.includes('UNIQUE constraint failed')) {
-      return c.json({ error: 'Error: Esa nueva hora ya está ocupada.' }, 409);
-    }
-    return c.json({ error: 'Error interno al modificar la cita', details: e.message }, 500);
+    if (e.message?.includes('UNIQUE constraint')) return c.json({ error: 'Hora ocupada' }, 409);
+    return c.json({ error: 'Error al modificar' }, 500);
   }
 });
 
-// RUTA PERFIL
 app.get('/api/profile', async (c) => {
-  const payload = c.var.jwtPayload;
-  const rut = payload.sub;
+  const rut = c.var.jwtPayload.sub;
   const user = await c.env.base_de_usuarios.prepare(
     "SELECT rut, nombrePaciente, fechaNacimiento, idGenero, mail, telefono FROM paciente WHERE rut = ?"
   ).bind(rut).first();
   if (user) return c.json(user);
-  else return c.json({ error: 'Usuario no encontrado' }, 404);
+  return c.json({ error: 'Usuario no encontrado' }, 404);
 });
 
-// RUTA OBTENER CONSULTAS
 app.get('/api/consultas', async (c) => {
-  const payload = c.var.jwtPayload;
-  const rut = payload.sub;
+  const rut = c.var.jwtPayload.sub;
   try {
     const query = `SELECT c.idConsulta, c.fechaHora, m.nombreMedico, e.especialidad
                    FROM consulta c
@@ -301,335 +233,357 @@ app.get('/api/consultas', async (c) => {
         date: apptDate.toLocaleDateString('es-CL', { day: '2-digit', month: 'long', timeZone: 'America/Santiago' }),
         time: apptDate.toLocaleTimeString('es-CL', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Santiago' }),
         status: isPast ? 'Completada' : 'Confirmada',
-        isPast: isPast,
+        isPast,
       };
     });
     return c.json(appointments);
   } catch (e: any) {
-    console.log("Error al obtener consultas:", e);
-    return c.json({ error: 'Error al obtener consultas', details: e.message }, 500);
+    return c.json({ error: 'Error al obtener consultas' }, 500);
   }
 });
 
-// --- LÓGICA DEL CHATBOT ---
+// ============================================
+// NUEVA LÓGICA: CHAT INTERACTIVO CON PUPPETEER
+// ============================================
 
-// Función para guardar cita
-async function guardarNuevaConsulta(c: Context<Env>, rutPaciente: string, especialidadNombre: string, fechaHoraCita: Date): Promise<string> {
+// Almacenamiento temporal de estados (EN PRODUCCIÓN: usar Durable Objects)
+const estadosTemporales = new Map<string, any>();
+
+// Función auxiliar para guardar cita en BD (MOVERLA ANTES DEL ENDPOINT)
+async function guardarCitaEnBD(c: Context<Env>, rutPaciente: string, datos: any) {
   try {
+    const { especialidad, fecha, hora } = datos;
+    
+    // Extraer día del texto de fecha
+    const diaMatch = fecha.match(/\d+/);
+    if (!diaMatch) {
+      console.error("⚠️ No se pudo extraer día de:", fecha);
+      return;
+    }
+    
+    const dia = diaMatch[0].padStart(2, '0');
+    const mesActual = (new Date().getMonth() + 1).toString().padStart(2, '0');
+    const añoActual = new Date().getFullYear();
+    
+    // Construir fecha ISO: YYYY-MM-DDTHH:mm:ss-03:00
+    const fechaISO = `${añoActual}-${mesActual}-${dia}T${hora}:00-03:00`;
+    const fechaHoraCita = new Date(fechaISO);
+    
+    if (isNaN(fechaHoraCita.getTime())) {
+      console.error("⚠️ Fecha inválida:", fechaISO);
+      return;
+    }
+    
+    console.log("📅 Guardando cita:", fechaHoraCita.toISOString());
+    
+    // Buscar especialidad en BD
     const especialidadResult = await c.env.base_de_usuarios.prepare(
-      "SELECT idEspecialidad FROM especialidad WHERE especialidad = ? LIMIT 1"
-    ).bind(especialidadNombre).first<{ idEspecialidad: number }>();
+      "SELECT idEspecialidad FROM especialidad WHERE especialidad LIKE ? LIMIT 1"
+    ).bind(`%${especialidad}%`).first<{ idEspecialidad: number }>();
     
     if (!especialidadResult) {
-      return `Lo siento, no pude encontrar la especialidad "${especialidadNombre}".`;
+      console.error("⚠️ Especialidad no encontrada:", especialidad);
+      return;
     }
     
+    // Buscar médico de esa especialidad
     const medicoResult = await c.env.base_de_usuarios.prepare(
-      "SELECT idMedico, nombreMedico FROM medico WHERE idEspecialidad = ? LIMIT 1"
-    ).bind(especialidadResult.idEspecialidad).first<{ idMedico: number, nombreMedico: string }>();
+      "SELECT idMedico FROM medico WHERE idEspecialidad = ? LIMIT 1"
+    ).bind(especialidadResult.idEspecialidad).first<{ idMedico: number }>();
     
     if (!medicoResult) {
-      return `Lo siento, no tenemos médicos para "${especialidadNombre}".`;
+      console.error("⚠️ Médico no encontrado");
+      return;
     }
     
-    await c.env.base_de_usuarios.prepare(
+    // Insertar consulta
+    const result = await c.env.base_de_usuarios.prepare(
       "INSERT INTO consulta (fechaHora, rut, idMedico) VALUES (?, ?, ?)"
     ).bind(fechaHoraCita.toISOString(), rutPaciente, medicoResult.idMedico).run();
     
-    return `¡Reserva completada! Tu hora para ${especialidadNombre} con ${medicoResult.nombreMedico} ha sido agendada para: ${fechaHoraCita.toLocaleString('es-CL', { timeZone: 'America/Santiago' })}.`;
-  } catch (e: any) {
-    console.log("Error al guardar consulta:", e);
-    if (e.message?.includes('UNIQUE constraint failed')) {
-      return `Lo siento, esa hora exacta ya está tomada. Por favor elige otra hora.`;
+    if (result.success) {
+      console.log("✅ Cita guardada en BD exitosamente");
+    } else {
+      console.error("❌ No se pudo guardar la cita");
     }
-    return `Error al guardar la cita: ${e.message}`;
+    
+  } catch (error: any) {
+    console.error("❌ Error guardando en BD:", error);
   }
 }
 
-// Función para borrar cita (directa, sin fetch)
-async function borrarConsulta(c: Context<Env>, rutPaciente: string, consultaId: number): Promise<string> {
-  try {
-    console.log(`Intentando borrar: idConsulta='${consultaId}', rut='${rutPaciente}'`);
-    
-    const { success } = await c.env.base_de_usuarios.prepare(
-      "DELETE FROM consulta WHERE idConsulta = ? AND rut = ?"
-    ).bind(consultaId, rutPaciente).run();
-    
-    if (!success) {
-      console.log(`DELETE falló: No se encontró fila con idConsulta=${consultaId} Y rut=${rutPaciente}`);
-      return `No encontré la cita con ID ${consultaId} o no te pertenece.`;
-    }
-    
-    console.log(`DELETE exitoso para idConsulta=${consultaId}, rut=${rutPaciente}`);
-    return `¡Cita ${consultaId} borrada con éxito!`;
-  } catch (e: any) {
-    console.error("Error al borrar consulta:", e);
-    return `Error al intentar borrar la cita: ${e.message}`;
-  }
-}
-
-// Función para modificar cita (directa, sin fetch)
-async function modificarConsulta(c: Context<Env>, rutPaciente: string, consultaId: number, nuevaFecha: Date): Promise<string> {
-  try {
-    console.log(`Intentando modificar: idConsulta='${consultaId}', rut='${rutPaciente}', nuevaFecha='${nuevaFecha.toISOString()}'`);
-    
-    const { success } = await c.env.base_de_usuarios.prepare(
-      "UPDATE consulta SET fechaHora = ? WHERE idConsulta = ? AND rut = ?"
-    ).bind(nuevaFecha.toISOString(), consultaId, rutPaciente).run();
-    
-    if (!success) {
-      console.log(`UPDATE falló: No se encontró fila con idConsulta=${consultaId} Y rut=${rutPaciente}`);
-      return `No encontré la cita con ID ${consultaId} o no te pertenece.`;
-    }
-    
-    console.log(`UPDATE exitoso para idConsulta=${consultaId}, rut=${rutPaciente}`);
-    const fechaFormateada = nuevaFecha.toLocaleString('es-CL', { timeZone: 'America/Santiago' });
-    return `¡Cita ${consultaId} modificada con éxito para el ${fechaFormateada}!`;
-  } catch (e: any) {
-    console.error("Error al modificar consulta:", e);
-    if (e.message?.includes('UNIQUE constraint failed')) {
-      return `Lo siento, la nueva hora ya está ocupada. Intenta con otra hora.`;
-    }
-    return `Error al intentar modificar la cita: ${e.message}`;
-  }
-}
-
-// Función para parsear fecha con validación
-function parsearFecha(fecha_iso: string): { fecha: Date | null, error: string | null } {
-  try {
-    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(fecha_iso)) {
-      return { fecha: null, error: 'Formato fecha_iso esperado YYYY-MM-DDTHH:MM:SS' };
-    }
-    const fechaConTimezone = new Date(fecha_iso + "-03:00");
-    if (isNaN(fechaConTimezone.getTime())) {
-      return { fecha: null, error: 'Fecha inválida después de parsear' };
-    }
-    return { fecha: fechaConTimezone, error: null };
-  } catch (e: any) {
-    return { fecha: null, error: e.message };
-  }
-}
-
-// Función Lógica Principal de la IA (CORREGIDA)
-async function procesarAccionIA(c: Context<Env>, rutPaciente: string, iaJSON: any, token: string): Promise<string> {
-  const { accion, especialidad, fecha_iso, consulta_id } = iaJSON;
-  console.log("Dentro de procesarAccionIA, acción detectada:", accion, "Datos:", iaJSON);
-
-  try {
-    // --- CASE 1: AGENDAR ---
-    if (accion === 'agendar') {
-      if (especialidad && fecha_iso) {
-        const { fecha, error } = parsearFecha(fecha_iso);
-        if (error || !fecha) {
-          return `La fecha que entendí (${fecha_iso}) no es válida: ${error}. ¿Podrías repetirla?`;
-        }
-        return await guardarNuevaConsulta(c, rutPaciente, especialidad, fecha);
-      } else if (especialidad && !fecha_iso) {
-        return `¡Perfecto! ¿Para qué fecha y hora te gustaría agendar en ${especialidad}?`;
-      } else if (!especialidad && fecha_iso) {
-        return `¡Claro! ¿Para qué especialidad necesitas la hora?`;
-      } else {
-        return "Necesito saber la especialidad y la fecha para agendar. ¿Qué especialidad necesitas y para cuándo?";
-      }
-    }
-
-    // --- CASE 2: BORRAR ---
-    else if (accion === 'borrar') {
-      if (consulta_id) {
-        console.log(`BORRAR: Detectado ID ${consulta_id}. Llamando a función directa...`);
-        return await borrarConsulta(c, rutPaciente, consulta_id);
-      } else {
-        // Listar citas para que el usuario elija
-        console.log("BORRAR: No se detectó ID, listando citas...");
-        const query = `SELECT c.idConsulta, c.fechaHora, e.especialidad 
-                       FROM consulta c 
-                       JOIN medico m ON c.idMedico = m.idMedico 
-                       JOIN especialidad e ON m.idEspecialidad = e.idEspecialidad 
-                       WHERE c.rut = ? AND c.fechaHora > datetime('now') 
-                       ORDER BY c.fechaHora ASC`;
-        const { results } = await c.env.base_de_usuarios.prepare(query).bind(rutPaciente)
-          .all<{ idConsulta: number, fechaHora: string, especialidad: string }>();
-        
-        if (!results || results.length === 0) {
-          return "No tienes ninguna cita futura para borrar.";
-        }
-        
-        const listaCitas = results.map(r => 
-          `[ID ${r.idConsulta}] ${r.especialidad} - ${new Date(r.fechaHora).toLocaleString('es-CL', { timeZone: 'America/Santiago' })}`
-        ).join("; ");
-        return `Tus próximas citas son: ${listaCitas}. Por favor, dime el ID de la cita que quieres borrar.`;
-      }
-    }
-
-    // --- CASE 3: MODIFICAR ---
-    else if (accion === 'modificar') {
-      if (consulta_id && fecha_iso) {
-        console.log(`MODIFICAR: Detectado ID ${consulta_id} y fecha ${fecha_iso}. Llamando a función directa...`);
-        
-        const { fecha, error } = parsearFecha(fecha_iso);
-        if (error || !fecha) {
-          return `La fecha que entendí (${fecha_iso}) no es válida: ${error}. ¿Podrías repetirla?`;
-        }
-        
-        return await modificarConsulta(c, rutPaciente, consulta_id, fecha);
-      } else if (consulta_id && !fecha_iso) {
-        return `Entendido, quieres modificar la cita ${consulta_id}. ¿Para qué nueva fecha y hora?`;
-      } else {
-        // Listar citas para que el usuario elija
-        console.log("MODIFICAR: No se detectó ID o fecha, listando citas...");
-        const query = `SELECT c.idConsulta, c.fechaHora, e.especialidad 
-                       FROM consulta c 
-                       JOIN medico m ON c.idMedico = m.idMedico 
-                       JOIN especialidad e ON m.idEspecialidad = e.idEspecialidad 
-                       WHERE c.rut = ? AND c.fechaHora > datetime('now') 
-                       ORDER BY c.fechaHora ASC`;
-        const { results } = await c.env.base_de_usuarios.prepare(query).bind(rutPaciente)
-          .all<{ idConsulta: number, fechaHora: string, especialidad: string }>();
-        
-        if (!results || results.length === 0) {
-          return "No tienes ninguna cita futura para modificar.";
-        }
-        
-        const listaCitas = results.map(r => 
-          `[ID ${r.idConsulta}] ${r.especialidad} - ${new Date(r.fechaHora).toLocaleString('es-CL', { timeZone: 'America/Santiago' })}`
-        ).join("; ");
-        return `Tus próximas citas son: ${listaCitas}. Por favor, dime el ID de la cita que quieres modificar y la nueva fecha/hora.`;
-      }
-    }
-
-    // --- CASE 4: HABLAR (Fallback) ---
-    else if (accion === 'hablar') {
-      console.log("Acción: hablar. Generando respuesta...");
-      if (especialidad && !fecha_iso) {
-        return `¡Perfecto! ¿Para qué fecha y hora en ${especialidad}?`;
-      } else if (!especialidad && fecha_iso) {
-        return `¡Claro! ¿Para qué especialidad necesitas la hora?`;
-      } else {
-        return "¡Hola! Soy tu asistente médico virtual. Puedo ayudarte a agendar, modificar o cancelar citas. ¿En qué puedo ayudarte?";
-      }
-    }
-
-    // --- DEFAULT FALLBACK ---
-    else {
-      console.warn("Acción desconocida o JSON incompleto:", iaJSON);
-      return "No estoy seguro de cómo ayudarte con eso. Puedo ayudarte a agendar, modificar o cancelar citas médicas. ¿Qué necesitas?";
-    }
-
-  } catch (outerError: any) {
-    console.error("Error inesperado en procesarAccionIA:", outerError);
-    return `Lo siento, ocurrió un error interno inesperado: ${outerError.message}`;
-  }
-}
-
-// RUTA PRINCIPAL DEL CHAT
 app.post('/api/chat', async (c) => {
   try {
-    const { prompt, history } = await c.req.json<{ prompt: string, history: { role: string, text: string }[] }>();
-    const payload = c.var.jwtPayload;
+    const { prompt } = await c.req.json<{ prompt: string }>();
+    const rutPaciente = c.var.jwtPayload.sub;
     
-    if (!payload) {
-      console.error("/api/chat: Middleware falló, falta payload");
-      return c.json({ error: 'Autenticación fallida' }, 401);
+    console.log("💬 Mensaje del usuario:", prompt);
+    
+    const stateKey = `state_${rutPaciente}`;
+    let estado = estadosTemporales.get(stateKey);
+    
+    // CANCELAR
+    if (/cancelar|empezar de nuevo|olvídalo|salir/i.test(prompt)) {
+      estadosTemporales.delete(stateKey);
+      return c.json({
+        role: 'ai',
+        text: 'Proceso cancelado. ¿En qué más puedo ayudarte?',
+        id: Date.now()
+      });
     }
     
-    const rutPaciente = payload.sub;
-    const token = c.req.header('Authorization')?.split(' ')[1] || '';
-
-    const { results: specialties } = await c.env.base_de_usuarios.prepare(
-      "SELECT especialidad FROM especialidad"
-    ).all<{ especialidad: string }>();
-    const specialtyList = specialties.map(s => s.especialidad).join(", ");
-    const today = new Date().toLocaleDateString('es-CL', { timeZone: 'America/Santiago' });
-
-    const systemPrompt = `Eres un extractor de intención para agendar citas médicas. Tu única tarea es analizar la solicitud del usuario y devolver un objeto JSON.
-La fecha de HOY es ${today}. Las ÚNICAS especialidades disponibles son: [${specialtyList}].
-Tu respuesta DEBE contener un bloque de JSON envuelto en etiquetas <json> y </json>.
-La estructura JSON es: <json>{ "accion": "string", "especialidad": "string|null", "fecha_iso": "string|null", "consulta_id": "number|null", "consulta_filtro": "string|null" }</json>
-
---- REGLAS ESTRICTAS DE EXTRACCIÓN ---
-1. Si quiere RESERVAR ("agéndame", "necesito hora", "quiero agendar"), usa "accion": "agendar".
-2. Si quiere ELIMINAR ("borra", "cancela", "elimina mi cita"), usa "accion": "borrar".
-3. Si quiere CAMBIAR ("modifica", "cambiar", "mover mi cita"), usa "accion": "modificar".
-4. Si solo saluda o faltan datos, usa "accion": "hablar".
-5. Si menciona un ID numérico ("cita 4", "la número 5"), extrae "consulta_id": 4.
-6. Si usa un filtro ("la de cardiología", "mi hora de pediatría"), extrae "consulta_filtro": "cardiología".
-7. Para fechas, SIEMPRE devuelve formato ISO: "YYYY-MM-DDTHH:MM:SS" (ejemplo: "2025-10-26T14:30:00").
-8. Si el usuario dice "mañana", "pasado mañana", calcula la fecha correcta desde HOY (${today}).
-9. Si no especifica hora, usa 09:00:00 por defecto.
-
-Ejemplos:
-- Usuario: "Quiero hora para cardiología mañana a las 3 pm" → {"accion":"agendar","especialidad":"Cardiología","fecha_iso":"2025-10-26T15:00:00","consulta_id":null,"consulta_filtro":null}
-- Usuario: "Borra mi cita 5" → {"accion":"borrar","especialidad":null,"fecha_iso":null,"consulta_id":5,"consulta_filtro":null}
-- Usuario: "Cambia mi cita de pediatría al lunes 10:00" → {"accion":"modificar","especialidad":null,"fecha_iso":"2025-10-27T10:00:00","consulta_id":null,"consulta_filtro":"Pediatría"}`;
-
-    const messages = [
-      { role: 'system', content: systemPrompt },
-      ...history.map(msg => ({ role: msg.role === 'ai' ? 'assistant' : 'user', content: msg.text })),
-      { role: 'user', content: prompt }
-    ];
+    // ESTADO: Esperando servicio
+    if (estado?.waitingFor === 'servicio') {
+      estado.servicio = prompt.trim();
+      estado.waitingFor = 'especialidad';
+      estadosTemporales.set(stateKey, estado);
+      
+      return c.json({
+        role: 'ai',
+        text: `Perfecto, has seleccionado: ${prompt}\n\n¿Qué especialidad médica necesitas?\nEjemplo: Medicina General, Pediatría, Cardiología, etc.`,
+        id: Date.now(),
+        waitingFor: 'especialidad'
+      });
+    }
     
-    const aiResponse: any = await c.env.AI.run('@cf/meta/llama-3-8b-instruct', { 
-      messages: messages,
-      max_tokens: 512,
-      temperature: 0.2
+    // ESTADO: Esperando especialidad
+    if (estado?.waitingFor === 'especialidad') {
+      estado.especialidad = prompt.trim();
+      estado.waitingFor = 'ubicacion';
+      estadosTemporales.set(stateKey, estado);
+      
+      return c.json({
+        role: 'ai',
+        text: `Excelente. Buscando ${prompt}...\n\n¿En qué ubicación prefieres atenderte?\nEjemplo: Providencia, Las Condes, Santiago Centro, etc.`,
+        id: Date.now(),
+        waitingFor: 'ubicacion'
+      });
+    }
+    
+    // ESTADO: Esperando ubicación -> EJECUTAR BÚSQUEDA
+    if (estado?.waitingFor === 'ubicacion') {
+      estado.ubicacion = prompt.trim();
+      
+      try {
+        console.log("🔍 Buscando horas disponibles...");
+        
+        const pacienteData = await c.env.base_de_usuarios.prepare(
+          "SELECT rut, telefono, mail FROM paciente WHERE rut = ?"
+        ).bind(rutPaciente).first<{ rut: string, telefono: string, mail: string }>();
+        
+        if (!pacienteData) {
+          return c.json({ role: 'ai', text: 'Error: datos de paciente no encontrados', id: Date.now() }, 500);
+        }
+        
+        // IMPORTAR LA FUNCIÓN
+        const { agendarCitaCompleta } = await import('./agente_snabb_interactivo.js');
+        
+        const resultado = await agendarCitaCompleta(
+          c.env,
+          {
+            rut: pacienteData.rut,
+            telefono: pacienteData.telefono,
+            email: pacienteData.mail
+          },
+          {
+            servicio: estado.servicio,
+            especialidad: estado.especialidad,
+            ubicacion: estado.ubicacion
+          }
+        );
+        
+        if (resultado.status === 'no_disponible') {
+          estadosTemporales.delete(stateKey);
+          return c.json({
+            role: 'ai',
+            text: resultado.message + '\n\n¿Quieres intentar con otra búsqueda?',
+            id: Date.now(),
+            debug_screenshot: resultado.screenshot
+          });
+        }
+        
+        // Guardar opciones
+        estado.opciones = resultado.opciones;
+        estado.browserEstado = resultado.estado;
+        estado.waitingFor = 'fecha';
+        estadosTemporales.set(stateKey, estado);
+        
+        let mensaje = `✅ Encontré horas disponibles!\n\n📅 Fechas disponibles:\n`;
+        resultado.opciones.fechas.forEach((f: string, i: number) => {
+          mensaje += `${i + 1}. ${f}\n`;
+        });
+        mensaje += `\n¿Qué fecha prefieres? (escribe el número o la fecha completa)`;
+        
+        return c.json({
+          role: 'ai',
+          text: mensaje,
+          id: Date.now(),
+          options: resultado.opciones.fechas,
+          debug_screenshot: resultado.screenshot,
+          waitingFor: 'fecha'
+        });
+        
+      } catch (error: any) {
+        console.error("💥 Error en búsqueda:", error);
+        estadosTemporales.delete(stateKey);
+        
+        return c.json({
+          role: 'ai',
+          text: `Error al buscar horas: ${error.message}. Por favor intenta de nuevo.`,
+          id: Date.now(),
+          debug_screenshot: error.screenshot || null
+        }, 500);
+      }
+    }
+    
+    // ESTADO: Esperando fecha
+    if (estado?.waitingFor === 'fecha') {
+      let fechaSeleccionada = null;
+      
+      // Intentar parsear número (1, 2, 3...)
+      const numero = parseInt(prompt.trim());
+      if (!isNaN(numero) && numero > 0 && numero <= estado.opciones.fechas.length) {
+        fechaSeleccionada = estado.opciones.fechas[numero - 1];
+      } else {
+        // Buscar coincidencia en las fechas disponibles
+        const normalizar = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+        fechaSeleccionada = estado.opciones.fechas.find((f: string) => 
+          normalizar(f).includes(normalizar(prompt)) || normalizar(prompt).includes(normalizar(f))
+        );
+      }
+      
+      if (!fechaSeleccionada) {
+        return c.json({
+          role: 'ai',
+          text: `No encontré esa fecha. Por favor elige una de las opciones:\n\n${estado.opciones.fechas.map((f: string, i: number) => `${i+1}. ${f}`).join('\n')}`,
+          id: Date.now(),
+          options: estado.opciones.fechas,
+          waitingFor: 'fecha'
+        });
+      }
+      
+      estado.fechaSeleccionada = fechaSeleccionada;
+      estado.waitingFor = 'hora';
+      estadosTemporales.set(stateKey, estado);
+      
+      let mensaje = `📅 Fecha seleccionada: ${fechaSeleccionada}\n\n🕐 Horas disponibles:\n`;
+      estado.opciones.horas.forEach((h: string, i: number) => {
+        mensaje += `${i + 1}. ${h}\n`;
+      });
+      mensaje += `\n¿Qué hora prefieres?`;
+      
+      return c.json({
+        role: 'ai',
+        text: mensaje,
+        id: Date.now(),
+        options: estado.opciones.horas,
+        waitingFor: 'hora'
+      });
+    }
+    
+    // ESTADO: Esperando hora -> CONFIRMAR RESERVA
+    if (estado?.waitingFor === 'hora') {
+      let horaSeleccionada = null;
+      
+      const numero = parseInt(prompt.trim());
+      if (!isNaN(numero) && numero > 0 && numero <= estado.opciones.horas.length) {
+        horaSeleccionada = estado.opciones.horas[numero - 1];
+      } else {
+        horaSeleccionada = estado.opciones.horas.find((h: string) => h.includes(prompt.trim()));
+      }
+      
+      if (!horaSeleccionada) {
+        return c.json({
+          role: 'ai',
+          text: `No encontré esa hora. Por favor elige una de las opciones:\n\n${estado.opciones.horas.map((h: string, i: number) => `${i+1}. ${h}`).join('\n')}`,
+          id: Date.now(),
+          options: estado.opciones.horas,
+          waitingFor: 'hora'
+        });
+      }
+      
+      try {
+        console.log("✅ Confirmando reserva...");
+        
+        const pacienteData = await c.env.base_de_usuarios.prepare(
+          "SELECT rut, telefono, mail FROM paciente WHERE rut = ?"
+        ).bind(rutPaciente).first<{ rut: string, telefono: string, mail: string }>();
+        
+        const { confirmarCita } = await import('./agente_snabb_interactivo.js');
+        
+        const resultado = await confirmarCita(
+          c.env,
+          estado.browserEstado,
+          estado.fechaSeleccionada,
+          horaSeleccionada,
+          {
+            rut: pacienteData!.rut,
+            telefono: pacienteData!.telefono,
+            email: pacienteData!.mail
+          }
+        );
+        
+        // Guardar en BD
+        await guardarCitaEnBD(c, rutPaciente, {
+          especialidad: estado.especialidad,
+          fecha: estado.fechaSeleccionada,
+          hora: horaSeleccionada
+        });
+        
+        // Limpiar estado
+        estadosTemporales.delete(stateKey);
+        
+        return c.json({
+          role: 'ai',
+          text: `${resultado.message}\n\n✅ Especialidad: ${estado.especialidad}\n📅 Fecha: ${estado.fechaSeleccionada}\n🕐 Hora: ${horaSeleccionada}\n🏥 Ubicación: ${estado.ubicacion}\n\nRecibirás una confirmación por correo.`,
+          id: Date.now(),
+          debug_screenshot: resultado.screenshot
+        });
+        
+      } catch (error: any) {
+        console.error("💥 Error confirmando:", error);
+        estadosTemporales.delete(stateKey);
+        
+        return c.json({
+          role: 'ai',
+          text: `Error al confirmar la reserva: ${error.message}. Por favor intenta de nuevo.`,
+          id: Date.now(),
+          debug_screenshot: error.screenshot || null
+        }, 500);
+      }
+    }
+    
+    // INICIO: Detectar intención de agendar
+    const intentoAgendar = /agendar|reserv|cita|hora|consulta|necesito|quiero/i.test(prompt);
+    
+    if (intentoAgendar) {
+      console.log("🚀 Iniciando proceso de agendamiento...");
+      
+      estadosTemporales.set(stateKey, {
+        waitingFor: 'servicio'
+      });
+      
+      return c.json({
+        role: 'ai',
+        text: `¡Perfecto! Te ayudaré a agendar una cita médica paso a paso.\n\n🏥 Primero, ¿qué tipo de servicio necesitas?\n\nOpciones comunes:\n• Consultas Médicas\n• Exámenes\n• Procedimientos\n• Telemedicina\n\n(Puedes escribir el nombre del servicio)`,
+        id: Date.now(),
+        waitingFor: 'servicio'
+      });
+    }
+    
+    // Conversación general
+    return c.json({
+      role: 'ai',
+      text: '¡Hola! Soy tu asistente médico virtual. Puedo ayudarte a:\n\n• Agendar citas médicas\n• Ver tus citas programadas\n• Modificar o cancelar citas\n\n¿Qué necesitas?',
+      id: Date.now()
     });
     
-    let iaJSON: any = null;
-    const responseText = aiResponse.response?.trim() || '';
-    
-    console.log("Respuesta cruda de la IA:", responseText);
-    
-    // Intentar extraer JSON
-    let jsonString = null;
-    const jsonMatch = responseText.match(/<json>([\s\S]*?)<\/json>/);
-    if (jsonMatch && jsonMatch[1]) {
-      jsonString = jsonMatch[1].trim();
-      console.log("JSON string encontrado usando etiquetas <json>");
-    }
-    
-    // Si no encontró con etiquetas, buscar llaves
-    if (!jsonString && responseText.includes('{') && responseText.includes('}')) {
-      const startIdx = responseText.indexOf('{');
-      const endIdx = responseText.lastIndexOf('}');
-      if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
-        jsonString = responseText.substring(startIdx, endIdx + 1);
-        console.log("JSON string encontrado buscando llaves {}");
-      }
-    }
-    
-    if (jsonString) {
-      try {
-        iaJSON = JSON.parse(jsonString);
-        console.log("JSON parseado exitosamente:", iaJSON);
-      } catch (e) {
-        console.warn("String parecía JSON pero malformado:", jsonString, e);
-        iaJSON = null;
-      }
-    }
-    
-    let textoRespuestaFinal: string = "";
-    
-    if (iaJSON && iaJSON.accion) {
-      textoRespuestaFinal = await procesarAccionIA(c, rutPaciente, iaJSON, token);
-    } else {
-      console.error("La IA no devolvió un JSON válido:", responseText);
-      // Intentar dar una respuesta genérica basada en el texto
-      if (responseText.toLowerCase().includes('hola') || responseText.toLowerCase().includes('saludo')) {
-        textoRespuestaFinal = "¡Hola! Soy tu asistente médico virtual. Puedo ayudarte a agendar, modificar o cancelar citas. ¿En qué puedo ayudarte?";
-      } else {
-        textoRespuestaFinal = "Lo siento, no pude entender tu solicitud. ¿Podrías reformularla? Puedo ayudarte a agendar, modificar o cancelar citas médicas.";
-      }
-    }
-    
-    console.log("/api/chat devolviendo:", textoRespuestaFinal);
-    return c.json({ role: 'ai', text: textoRespuestaFinal, id: Date.now() });
-
-  } catch (e: any) {
-    console.error("Error crítico en /api/chat:", e);
-    return c.json({ 
-      role: 'ai', 
-      text: `Lo siento, ocurrió un error al procesar tu mensaje: ${e.message}`, 
-      id: Date.now() 
+  } catch (error: any) {
+    console.error("💥 Error en /api/chat:", error);
+    return c.json({
+      role: 'ai',
+      text: `Error inesperado: ${error.message}`,
+      id: Date.now()
     }, 500);
   }
 });
