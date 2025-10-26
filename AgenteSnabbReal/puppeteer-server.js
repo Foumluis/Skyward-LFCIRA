@@ -21,12 +21,17 @@ app.use((req, res, next) => {
 
 // Endpoint de salud
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', message: 'Puppeteer Server is running' });
+  res.json({ 
+    status: 'ok', 
+    message: 'Puppeteer Server is running',
+    timestamp: new Date().toISOString(),
+    nodeVersion: process.version
+  });
 });
 
 // Endpoint principal para agendar hora
 app.post('/agendar', async (req, res) => {
-  console.log('\n🔔 Nueva solicitud de agendamiento recibida');
+  console.log('\n📥 Nueva solicitud de agendamiento recibida');
   console.log('📦 Datos recibidos:', JSON.stringify(req.body, null, 2));
 
   const { rut, nombreCompleto, telefono, email, especialidad, fecha, medico } = req.body;
@@ -70,12 +75,13 @@ app.post('/agendar', async (req, res) => {
       numeroDocumento: rut,
       servicio: "Consultas",
       especialidad: especialidad,
-      region: "Providencia", // Puedes hacerlo configurable
+      region: "Providencia",
       fecha: dia,
-      medico: medico || null, // Opcional
+      medico: medico || null,
       hora: hora,
       telefono: telefono || null,
-      email: email || null
+      email: email || null,
+      headless: true // Siempre headless en producción
     }).then(() => {
       console.log(`✅ Agendamiento completado exitosamente para ${nombreCompleto}`);
     }).catch((error) => {
@@ -85,7 +91,6 @@ app.post('/agendar', async (req, res) => {
   } catch (error) {
     console.error('💥 Error procesando solicitud:', error);
     
-    // Si ya respondimos, no podemos enviar otra respuesta
     if (!res.headersSent) {
       res.status(500).json({ 
         error: 'Error al procesar el agendamiento',
@@ -97,7 +102,6 @@ app.post('/agendar', async (req, res) => {
 
 // Endpoint para consultar el estado de un agendamiento (opcional)
 app.get('/status/:rut', (req, res) => {
-  // Aquí podrías implementar un sistema de tracking si lo necesitas
   res.json({ 
     message: 'Endpoint de estado en desarrollo',
     rut: req.params.rut
@@ -115,9 +119,10 @@ app.use((err, req, res, next) => {
 
 // Iniciar servidor
 app.listen(PORT, () => {
-  console.log(`\n🚀 Puppeteer Server corriendo en http://localhost:${PORT}`);
-  console.log(`📍 Endpoint principal: http://localhost:${PORT}/agendar`);
-  console.log(`🏥 Endpoint de salud: http://localhost:${PORT}/health\n`);
+  console.log(`\n🚀 Puppeteer Server corriendo en puerto ${PORT}`);
+  console.log(`📍 Endpoint principal: /agendar`);
+  console.log(`🏥 Endpoint de salud: /health`);
+  console.log(`🐛 Node version: ${process.version}\n`);
 });
 
 export default app;
