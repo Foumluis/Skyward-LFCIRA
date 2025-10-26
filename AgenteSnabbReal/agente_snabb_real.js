@@ -70,24 +70,21 @@ export async function reservarHora({
   console.log(`👨‍⚕️ Médico: ${medico || 'Cualquiera'}`);
   console.log(`${'='.repeat(60)}\n`);
 
-const browser = await puppeteer.launch({
-  headless: true,
-  args: [
-    '--no-sandbox',
-    '--disable-setuid-sandbox',
-    '--disable-dev-shm-usage',
-    '--disable-accelerated-2d-canvas',
-    '--no-first-run',
-    '--no-zygote',
-    '--single-process',
-    '--disable-gpu',
-    '--disable-blink-features=AutomationControlled'
-  ],
-  ignoreHTTPSErrors: true
-  // ELIMINA completamente la línea executablePath
-  // Puppeteer usará su propio Chrome empaquetado
-});
-
+  // NUEVA CONFIGURACIÓN - Sin executablePath
+  const browser = await puppeteer.launch({
+    headless: headless ? 'new' : false, // Usa el nuevo modo headless
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--no-first-run',
+      '--no-zygote',
+      '--disable-gpu'
+    ],
+    ignoreHTTPSErrors: true
+    // NO incluyas executablePath - Puppeteer usará el Chrome que descargó
+  });
   const page = await browser.newPage();
   await page.setViewport({ width: 1920, height: 1080 });
   page.setDefaultTimeout(25000);
