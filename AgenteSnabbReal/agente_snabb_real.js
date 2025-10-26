@@ -1,3 +1,6 @@
+// agente_snabb_real.js (MODIFICADO)
+// Script de Puppeteer que ahora es una función exportable
+
 import puppeteer from "puppeteer";
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -42,30 +45,47 @@ async function typeInto(page, selector, value, timeout = 8000) {
   await sleep(150);
 }
 
-async function reservarHora({
+// ====================================
+// FUNCIÓN PRINCIPAL EXPORTABLE
+// ====================================
+export async function reservarHora({
   url = "https://agenda.redsalud.cl/patientPortal/identifyPatient",
-  // PASO 1: Identificación
-  tipoDocumento = "Carnet de Identidad",   // "Carnet de Identidad" | "Pasaporte"
-  numeroDocumento = "21764574-3",
-  // PASO 2: Servicio
-  servicio = "Consultas",                   // "Consultas" | "Telemedicina"
-  // PASO 3: Especialidad y Región
-  especialidad = "Medicina General",        // Ej: "Medicina General", "Pediatría", etc.
-  region = null,                            // Opcional: "Santiago", "Providencia", etc.
-  // PASO 4: Día, Médico y Hora
-  fecha = null,                             // Opcional: "27", "lunes", "28 martes", etc.
-  medico = null,                            // Opcional: "Luis Jose", "Rodriguez", etc.
-  hora = null,                              // Opcional: "09:15", "10:30", etc.
-  // PASO 5: Datos de contacto
-  telefono = null,                          // Opcional: "+56994123456"
-  email = null                              // Opcional: "usuario@ejemplo.com"
+  tipoDocumento = "Carnet de Identidad",
+  numeroDocumento,
+  servicio = "Consultas",
+  especialidad,
+  region = null,
+  fecha = null,
+  medico = null,
+  hora = null,
+  telefono = null,
+  email = null,
+  headless = false // Cambiado a false para debugging, true para producción
 } = {}) {
+  
+  // Validación de datos requeridos
+  if (!numeroDocumento || !especialidad) {
+    throw new Error('numeroDocumento y especialidad son requeridos');
+  }
+
+  console.log(`\n${'='.repeat(60)}`);
+  console.log(`🏥 INICIANDO AGENDAMIENTO EN REDSALUD`);
+  console.log(`${'='.repeat(60)}`);
+  console.log(`📋 RUT: ${numeroDocumento}`);
+  console.log(`🏥 Especialidad: ${especialidad}`);
+  console.log(`📅 Fecha: ${fecha || 'Primera disponible'}`);
+  console.log(`⏰ Hora: ${hora || 'Primera disponible'}`);
+  console.log(`👨‍⚕️ Médico: ${medico || 'Cualquiera'}`);
+  console.log(`${'='.repeat(60)}\n`);
+
   const browser = await puppeteer.launch({
-    headless: false,
+    headless: headless,
     defaultViewport: null,
     args: [
       "--start-maximized",
-      "--disable-blink-features=AutomationControlled"
+      "--disable-blink-features=AutomationControlled",
+      "--no-sandbox",
+      "--disable-setuid-sandbox"
     ],
     ignoreHTTPSErrors: true
   });
@@ -119,7 +139,6 @@ async function reservarHora({
     });
     
     console.log("📋 Opciones disponibles en el dropdown:", opcionesDisponibles);
-
     console.log(`🔍 Buscando opción: "${tipoDocumento}"`);
     
     const picked = await page.evaluate((texto) => {
@@ -235,12 +254,10 @@ async function reservarHora({
     // ============================================
     console.log("\n=== PASO 2: SELECCIONAR SERVICIO ===");
     
-    // Esperar a que aparezcan las tarjetas de servicio
     console.log("⏳ Esperando que carguen las tarjetas de servicio...");
     await page.waitForSelector('.MuiCard-root, [id="cardMainArea"]', { timeout: 10000 });
     await sleep(1500);
     
-    // Mostrar servicios disponibles
     const serviciosDisponibles = await page.evaluate(() => {
       const cards = Array.from(document.querySelectorAll('.MuiCard-root [class*="MuiTypography"]'));
       return cards
@@ -252,16 +269,13 @@ async function reservarHora({
     
     console.log(`🔍 Buscando servicio: "${servicio}"`);
     
-    // Buscar y hacer click en la tarjeta del servicio
     const servicioClicked = await page.evaluate((srv) => {
       const N = (s) => (s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().trim();
       
-      // Buscar el div con el texto del servicio
       const typographies = Array.from(document.querySelectorAll('.MuiTypography-root'));
       const targetTypo = typographies.find(t => N(t.textContent) === N(srv));
       
       if (targetTypo) {
-        // Encontrar el botón padre que contiene esta tarjeta
         const cardButton = targetTypo.closest('button.MuiCardActionArea-root') || 
                           targetTypo.closest('.MuiCard-root')?.closest('button');
         
@@ -286,12 +300,10 @@ async function reservarHora({
     // ============================================
     console.log("\n=== PASO 3: SELECCIONAR ESPECIALIDAD Y REGIÓN ===");
     
-    // Esperar a que cargue la página de búsqueda
     console.log("⏳ Esperando campos de búsqueda...");
     await page.waitForSelector('input#filterService, input[placeholder*="búsqueda"]', { timeout: 10000 });
     await sleep(1500);
     
-    // Escribir en el campo de Consulta/Especialidad
     if (especialidad) {
       console.log(`✍️ Escribiendo especialidad: "${especialidad}"`);
       
@@ -303,7 +315,6 @@ async function reservarHora({
         console.log(`✅ Especialidad escrita: "${especialidad}"`);
         await sleep(800);
         
-        // Esperar a que aparezcan sugerencias y seleccionar la primera
         try {
           await page.waitForSelector('[role="option"], .MuiAutocomplete-option', { timeout: 3000 });
           await sleep(500);
@@ -330,7 +341,6 @@ async function reservarHora({
       }
     }
     
-    // Escribir en el campo de Región o Centro
     if (region) {
       console.log(`📍 Escribiendo región: "${region}"`);
       
@@ -342,7 +352,6 @@ async function reservarHora({
         console.log(`✅ Región escrita: "${region}"`);
         await sleep(800);
         
-        // Esperar a que aparezcan sugerencias y seleccionar la primera
         try {
           await page.waitForSelector('[role="option"], .MuiAutocomplete-option', { timeout: 3000 });
           await sleep(500);
@@ -369,7 +378,6 @@ async function reservarHora({
       }
     }
     
-    // Hacer click en BUSCAR HORAS
     console.log("🔍 Buscando el botón BUSCAR HORAS...");
     await sleep(1000);
     
@@ -384,12 +392,12 @@ async function reservarHora({
         return true;
       }
       return false;
-    });
+    }, servicio);
     
     if (buscarClicked) {
       console.log("✅ BUSCAR HORAS pulsado");
     } else {
-      console.log("⚠️ No se pudo hacer click en BUSCAR HORAS (puede estar deshabilitado)");
+      console.log("⚠️ No se pudo hacer click en BUSCAR HORAS");
     }
     
     await sleep(4000);
@@ -399,28 +407,23 @@ async function reservarHora({
     // ============================================
     console.log("\n=== PASO 4: SELECCIONAR DÍA, MÉDICO Y HORA ===");
     
-    // Esperar a que carguen las fechas y médicos disponibles
     console.log("⏳ Esperando resultados de búsqueda...");
     await page.waitForSelector('.MuiBox-root, .MuiCard-root', { timeout: 15000 });
     await sleep(2000);
     
-    // Seleccionar fecha si se especificó
     if (fecha) {
       console.log(`📅 Buscando fecha: "${fecha}"`);
       
       const fechaClicked = await page.evaluate((f) => {
         const N = (s) => (s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().trim();
         
-        // Buscar contenedores de fecha
         const fechaBoxes = Array.from(document.querySelectorAll('.MuiBox-root'));
         
         for (const box of fechaBoxes) {
           const textos = Array.from(box.querySelectorAll('p.MuiTypography-root'));
           const textoCompleto = textos.map(t => N(t.textContent)).join(' ');
           
-          // Buscar por número de día o día de la semana
           if (textoCompleto.includes(N(f))) {
-            // Verificar que no sea "Sin Horas"
             if (!textoCompleto.includes('sin horas')) {
               box.scrollIntoView({ behavior: "smooth", block: "center" });
               box.click();
@@ -439,17 +442,13 @@ async function reservarHora({
       }
     }
     
-    // Buscar médico si se especificó
     if (medico) {
       console.log(`👨‍⚕️ Buscando médico: "${medico}"`);
-      
-      // Expandir acordeones si es necesario
       await sleep(1000);
       
       const medicoEncontrado = await page.evaluate((med) => {
         const N = (s) => (s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().trim();
         
-        // Buscar en todos los nombres de médicos
         const medicoNames = Array.from(document.querySelectorAll('p.MuiTypography-root'));
         
         for (const name of medicoNames) {
@@ -470,21 +469,16 @@ async function reservarHora({
       }
     }
     
-    // Seleccionar hora
     if (hora) {
       console.log(`⏰ Buscando hora: "${hora}"`);
       
       const horaClicked = await page.evaluate((h) => {
-        // Buscar botones de hora con la estructura específica de RedSalud
         const buttons = Array.from(document.querySelectorAll('button.MuiButton-root'));
         
-        // Buscar botón que contenga la hora exacta
         for (const btn of buttons) {
           const texto = btn.textContent.replace(/\s+/g, ' ').trim();
           
-          // Buscar formato "Reservar 09:15" (con el &nbsp; convertido a espacio)
           if (texto.includes('Reservar') && texto.includes(h)) {
-            // Verificar que no sea el botón de "X HORAS ESTE DIA"
             if (!texto.includes('HORAS') && !texto.includes('ESTE DIA')) {
               btn.scrollIntoView({ behavior: "smooth", block: "center" });
               btn.click();
@@ -502,16 +496,13 @@ async function reservarHora({
         console.log(`⚠️ No se encontró la hora "${hora}"`);
         console.log("ℹ️ Buscando primera hora disponible...");
         
-        // Seleccionar primera hora disponible
         const primeraHora = await page.evaluate(() => {
           const buttons = Array.from(document.querySelectorAll('button.MuiButton-root'));
           
           for (const btn of buttons) {
             const texto = btn.textContent.replace(/\s+/g, ' ').trim();
             
-            // Buscar formato "Reservar HH:MM"
             if (texto.includes('Reservar') && /\d{2}:\d{2}/.test(texto)) {
-              // Verificar que no sea el botón de "X HORAS ESTE DIA"
               if (!texto.includes('HORAS') && !texto.includes('ESTE DIA')) {
                 btn.scrollIntoView({ behavior: "smooth", block: "center" });
                 btn.click();
@@ -532,16 +523,13 @@ async function reservarHora({
     } else {
       console.log("ℹ️ No se especificó hora. Seleccionando primera hora disponible...");
       
-      // Seleccionar primera hora disponible si no se especificó
       const primeraHora = await page.evaluate(() => {
         const buttons = Array.from(document.querySelectorAll('button.MuiButton-root'));
         
         for (const btn of buttons) {
           const texto = btn.textContent.replace(/\s+/g, ' ').trim();
           
-          // Buscar formato "Reservar HH:MM"
           if (texto.includes('Reservar') && /\d{2}:\d{2}/.test(texto)) {
-            // Verificar que no sea el botón de "X HORAS ESTE DIA"
             if (!texto.includes('HORAS') && !texto.includes('ESTE DIA')) {
               btn.scrollIntoView({ behavior: "smooth", block: "center" });
               btn.click();
@@ -559,19 +547,16 @@ async function reservarHora({
     }
 
     // ============================================
-    // PASO 5: ACEPTAR TÉRMINOS E INFORMACIÓN ADICIONAL
+    // PASO 5: ACEPTAR TÉRMINOS E INFORMACIÓN
     // ============================================
     console.log("\n=== PASO 5: ACEPTAR TÉRMINOS ===");
     
-    // Esperar a que aparezca el modal de información adicional
     console.log("⏳ Esperando modal de información adicional...");
     
     try {
-      // Esperar el botón ACEPTO
       await page.waitForSelector('button[type="submit"]', { timeout: 8000 });
       await sleep(1000);
       
-      // Buscar y hacer click en el botón ACEPTO
       const aceptoClicked = await page.evaluate(() => {
         const N = (s) => (s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().trim();
         const buttons = Array.from(document.querySelectorAll('button[type="submit"], button'));
@@ -594,16 +579,15 @@ async function reservarHora({
       }
       
     } catch (e) {
-      console.log("ℹ️ No apareció modal de términos (puede que no sea necesario)");
+      console.log("ℹ️ No apareció modal de términos");
     }
 
     // ============================================
-    // PASO 5.5: COMPLETAR DATOS DE CONTACTO
+    // PASO 6: COMPLETAR DATOS DE CONTACTO
     // ============================================
-    console.log("\n=== COMPLETANDO DATOS DE CONTACTO ===");
+    console.log("\n=== PASO 6: COMPLETANDO DATOS DE CONTACTO ===");
     await sleep(2000);
     
-    // Completar teléfono si se proporcionó
     if (telefono) {
       console.log(`📱 Completando teléfono: "${telefono}"`);
       
@@ -627,7 +611,6 @@ async function reservarHora({
       }
     }
     
-    // Completar email si se proporcionó
     if (email) {
       console.log(`📧 Completando email: "${email}"`);
       
@@ -651,25 +634,19 @@ async function reservarHora({
       }
     }
     
-    // Aceptar términos y condiciones
     console.log("☑️ Aceptando términos y condiciones...");
     
     try {
       await sleep(800);
       
       const checkboxClicked = await page.evaluate(() => {
-        // Buscar el checkbox específico
         const checkbox = document.querySelector('input.PrivateSwitchBase-input.css-1m9pwf3[type="checkbox"][data-indeterminate="false"]');
         
         if (checkbox) {
-          console.log("Checkbox encontrado, checked:", checkbox.checked);
-          
           if (!checkbox.checked) {
-            // Intentar hacer click en el checkbox directamente
             checkbox.scrollIntoView({ behavior: "smooth", block: "center" });
             checkbox.click();
             
-            // También intentar con el padre por si el checkbox está oculto visualmente
             const parent = checkbox.closest('span.MuiButtonBase-root') || 
                           checkbox.closest('.MuiCheckbox-root') || 
                           checkbox.parentElement;
@@ -692,9 +669,8 @@ async function reservarHora({
       if (checkboxClicked) {
         console.log("✅ Términos y condiciones aceptados");
       } else {
-        console.log("⚠️ No se pudo aceptar los términos, intentando método alternativo...");
+        console.log("⚠️ Intentando método alternativo para checkbox...");
         
-        // Método alternativo: buscar por cualquier checkbox visible
         const alternativeClick = await page.evaluate(() => {
           const allCheckboxes = Array.from(document.querySelectorAll('input[type="checkbox"]'));
           
@@ -702,12 +678,10 @@ async function reservarHora({
             const style = window.getComputedStyle(cb);
             const parentStyle = cb.parentElement ? window.getComputedStyle(cb.parentElement) : null;
             
-            // Verificar si es visible (aunque sea con opacity 0)
             if (style.display !== 'none' && parentStyle && parentStyle.display !== 'none') {
               if (!cb.checked) {
                 cb.scrollIntoView({ behavior: "smooth", block: "center" });
                 
-                // Click en el padre que generalmente es el componente MUI visible
                 const clickTarget = cb.closest('span.MuiButtonBase-root') || 
                                    cb.closest('.MuiCheckbox-root') ||
                                    cb.closest('label') ||
@@ -726,49 +700,36 @@ async function reservarHora({
         
         if (alternativeClick) {
           console.log("✅ Términos aceptados con método alternativo");
-        } else {
-          console.log("⚠️ No se encontró checkbox de términos");
         }
       }
     } catch (e) {
       console.log("⚠️ Error al aceptar términos:", e.message);
     }
     
-    // Buscar y hacer click en RESERVAR HORA
     console.log("🔍 Buscando botón RESERVAR HORA...");
     await sleep(1500);
     
     const reservarClicked = await page.evaluate(() => {
       const N = (s) => (s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().trim();
       
-      // Buscar específicamente el botón con las clases de MUI y el estilo correcto
       const buttons = Array.from(document.querySelectorAll('button.MuiButton-root.MuiButton-textPrimary.css-r5j4e0'));
       
-      // Filtrar por el texto "RESERVAR HORA"
       const btnReservar = buttons.find(btn => {
         const texto = N(btn.textContent);
         return texto === 'reservar hora';
       });
       
       if (btnReservar) {
-        console.log("Botón RESERVAR HORA encontrado");
         btnReservar.scrollIntoView({ behavior: "smooth", block: "center" });
-        
-        // Hacer click múltiple para asegurar que se registre
         btnReservar.click();
-        
-        // Disparar evento de mouse también
         btnReservar.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-        
         return true;
       }
       
-      // Método alternativo: buscar cualquier botón con el texto "RESERVAR HORA"
       const allButtons = Array.from(document.querySelectorAll('button'));
       const altBtn = allButtons.find(btn => N(btn.textContent) === 'reservar hora');
       
       if (altBtn) {
-        console.log("Botón encontrado con método alternativo");
         altBtn.scrollIntoView({ behavior: "smooth", block: "center" });
         altBtn.click();
         altBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
@@ -785,7 +746,6 @@ async function reservarHora({
       console.log("⚠️ No se encontró el botón RESERVAR HORA");
       console.log("ℹ️ Intentando con Puppeteer click directo...");
       
-      // Método de respaldo usando Puppeteer directamente
       try {
         await page.waitForSelector('button.MuiButton-root.css-r5j4e0', { timeout: 3000 });
         const botonReservar = await page.$('button.MuiButton-root.css-r5j4e0');
@@ -801,35 +761,60 @@ async function reservarHora({
     }
 
     console.log("\n✅ PROCESO COMPLETADO - RESERVA LISTA");
-    console.log("📍 El navegador permanecerá abierto para confirmar la reserva final...");
+    console.log(`${'='.repeat(60)}`);
+    console.log("📸 Tomando screenshot final...");
     
-    // No cerrar el navegador para continuar manualmente
-    // await browser.close();
+    await page.screenshot({ path: `redsalud_exito_${numeroDocumento}_${Date.now()}.png`, fullPage: true });
+    console.log("✅ Screenshot guardado");
+    
+    console.log(`${'='.repeat(60)}\n`);
+    
+    await browser.close();
+    
+    return {
+      success: true,
+      message: "Agendamiento completado exitosamente",
+      data: {
+        rut: numeroDocumento,
+        especialidad,
+        fecha,
+        hora
+      }
+    };
     
   } catch (e) {
-    console.error("\n💥 Error:", e.message);
+    console.error("\n💥 ERROR EN EL PROCESO:", e.message);
+    console.log(`${'='.repeat(60)}\n`);
+    
     try { 
-      await page.screenshot({ path: "redsalud_error.png", fullPage: true }); 
-      console.log("📸 Screenshot guardado: redsalud_error.png");
+      await page.screenshot({ path: `redsalud_error_${numeroDocumento}_${Date.now()}.png`, fullPage: true }); 
+      console.log("📸 Screenshot de error guardado");
     } catch {}
-    // await browser.close();
+    
+    await browser.close();
+    
+    throw e;
   }
 }
 
-// ============================================
-// EJEMPLOS DE USO
-// ============================================
-
-// Ejemplo 1: Reserva completa con todos los parámetros
-reservarHora({
-  tipoDocumento: "Carnet de Identidad",
-  numeroDocumento: "21764574-3",
-  servicio: "Consultas",
-  especialidad: "Medicina General",
-  region: "Providencia",
-  fecha: "27",                    // Busca el día 27
-  medico: "Luis Jose Rodriguez",  // Busca este médico específico
-  hora: "09:15",                   // Busca esta hora específica
-  telefono: "954450476",        // NUEVO: Teléfono
-  email: "luiscaceresalarcon@outlook.com"     // NUEVO: Email
-});
+// Para testing directo del script
+if (import.meta.url === `file://${process.argv[1]}`) {
+  reservarHora({
+    tipoDocumento: "Carnet de Identidad",
+    numeroDocumento: "21764574-3",
+    servicio: "Consultas",
+    especialidad: "Medicina General",
+    region: "Providencia",
+    fecha: "27",
+    medico: "Luis Jose Rodriguez",
+    hora: "09:15",
+    telefono: "954450476",
+    email: "luiscaceresalarcon@outlook.com"
+  }).then(() => {
+    console.log("✅ Script ejecutado exitosamente");
+    process.exit(0);
+  }).catch((error) => {
+    console.error("❌ Error:", error);
+    process.exit(1);
+  });
+}

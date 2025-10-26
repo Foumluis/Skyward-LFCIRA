@@ -1,26 +1,32 @@
 {
-  "name": "agente-redsalud",
+  "name": "puppeteer-redsalud-server",
   "version": "1.0.0",
-  "description": "Bot automatizado para reservar horas médicas en RedSalud Chile usando Puppeteer",
-  "main": "agente_redsalud.js",
+  "description": "Servidor para ejecutar agendamientos automáticos en RedSalud con Puppeteer",
   "type": "module",
+  "main": "puppeteer-server.js",
   "scripts": {
-    "start": "node agente_redsalud.js",
-    "dev": "node --watch agente_redsalud.js"
+    "start": "node puppeteer-server.js",
+    "dev": "nodemon puppeteer-server.js",
+    "test": "node agente_snabb_real.js"
   },
   "keywords": [
-    "redsalud",
-    "automation",
     "puppeteer",
-    "bot",
-    "chile"
+    "automation",
+    "redsalud",
+    "medical",
+    "appointment"
   ],
   "author": "",
-  "license": "MIT",
+  "license": "ISC",
   "dependencies": {
-    "puppeteer": "^23.7.0"
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "puppeteer": "^21.0.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=16.0.0"
   }
 }
