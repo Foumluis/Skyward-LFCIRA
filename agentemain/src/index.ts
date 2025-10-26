@@ -392,6 +392,18 @@ app.post('/api/chat', async (c) => {
           }
         );
         
+        // ✅ MANEJAR CASO DE ERROR
+        if (resultado.status === 'error') {
+          console.log("📸 Screenshot en error recibido:", resultado.screenshot ? "SÍ" : "NO");
+          estadosTemporales.delete(stateKey);
+          return c.json({
+            role: 'ai',
+            text: `Error al buscar horas: ${resultado.message}\n\n¿Quieres intentar con otra búsqueda?`,
+            id: Date.now(),
+            debug_screenshot: resultado.screenshot
+          });
+        }
+        
         if (resultado.status === 'no_disponible') {
           estadosTemporales.delete(stateKey);
           return c.json({
@@ -522,6 +534,17 @@ app.post('/api/chat', async (c) => {
             email: pacienteData!.mail
           }
         );
+        
+        // ✅ MANEJAR CASO DE ERROR EN CONFIRMACIÓN
+        if (resultado.status === 'error') {
+          estadosTemporales.delete(stateKey);
+          return c.json({
+            role: 'ai',
+            text: `Error al confirmar la reserva: ${resultado.message}. Por favor intenta de nuevo.`,
+            id: Date.now(),
+            debug_screenshot: resultado.screenshot
+          });
+        }
         
         // Guardar en BD
         await guardarCitaEnBD(c, rutPaciente, {

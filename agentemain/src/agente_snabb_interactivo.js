@@ -77,6 +77,7 @@ export async function agendarCitaCompleta(env, datosUsuario, parametros) {
     
     screenshot = await page.screenshot({ encoding: 'base64', fullPage: true });
     console.log("📸 Screenshot final con opciones disponibles");
+    console.log("📸 Tamaño del screenshot exitoso:", screenshot?.length || 0);
     await browser.close();
     
     return {
@@ -93,12 +94,16 @@ export async function agendarCitaCompleta(env, datosUsuario, parametros) {
   } catch (error) {
     console.error("💥 Error:", error);
     
-    // Capturar screenshot del error
     let errorScreenshot = null;
     if (page) {
       try {
         errorScreenshot = await page.screenshot({ encoding: 'base64', fullPage: true });
         console.log("📸 Screenshot del error capturado");
+        console.log("📸 Tamaño del screenshot de error:", errorScreenshot?.length || 0);
+        
+        // Capturar HTML para debugging
+        const html = await page.content();
+        console.log("📄 HTML de la página (primeros 500 chars):", html.substring(0, 500));
       } catch (e) {
         console.log("No se pudo capturar screenshot del error");
       }
@@ -110,10 +115,12 @@ export async function agendarCitaCompleta(env, datosUsuario, parametros) {
       } catch {}
     }
     
-    // Re-lanzar el error con el screenshot
-    const enhancedError = new Error(error.message);
-    enhancedError.screenshot = errorScreenshot;
-    throw enhancedError;
+    // ✅ RETORNAR UN OBJETO EN LUGAR DE LANZAR ERROR
+    return {
+      status: 'error',
+      message: error.message,
+      screenshot: errorScreenshot
+    };
   }
 }
 
@@ -165,12 +172,29 @@ export async function confirmarCita(env, estado, fecha, hora, datosUsuario) {
     
   } catch (error) {
     console.error("💥 Error en confirmación:", error);
+    
+    let errorScreenshot = null;
+    if (page) {
+      try {
+        errorScreenshot = await page.screenshot({ encoding: 'base64', fullPage: true });
+        console.log("📸 Screenshot del error en confirmación capturado");
+      } catch (e) {
+        console.log("No se pudo capturar screenshot del error en confirmación");
+      }
+    }
+    
     if (browser) {
       try {
         await browser.close();
       } catch {}
     }
-    throw error;
+    
+    // ✅ RETORNAR ERROR CON SCREENSHOT
+    return {
+      status: 'error',
+      message: error.message,
+      screenshot: errorScreenshot
+    };
   }
 }
 
@@ -206,27 +230,60 @@ async function identificarPaciente(page, rut) {
 }
 
 async function seleccionarServicio(page, servicio) {
-  await page.waitForSelector('.MuiCard-root');
+  // Espera a que las tarjetas estén visibles
+  await page.waitForSelector('.MuiCard-root', { timeout: 15000 });
   await sleep(1500);
-  
-  await page.evaluate((srv) => {
-    const cards = Array.from(document.querySelectorAll('.MuiCard-root'));
-    for (const card of cards) {
-      if (card.textContent.toLowerCase().includes(srv.toLowerCase())) {
-        card.click();
-        break;
+
+  const servicioClicked = await page.evaluate((srv) => {
+    // Función para normalizar texto (ignora acentos y mayúsculas)
+    const N = (s) => (s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+    
+    // 1. Busca todos los elementos de texto
+    const typographies = Array.from(document.querySelectorAll('.MuiTypography-root'));
+    
+    // 2. Encuentra el que coincide exactamente con el servicio
+    const targetTypo = typographies.find(t => N(t.textContent) === N(srv));
+    
+    if (targetTypo) {
+      // 3. ¡IMPORTANTE! Sube en el DOM hasta encontrar el botón real
+      const cardButton = targetTypo.closest('button.MuiCardActionArea-root') ||
+                         targetTypo.closest('.MuiCard-root')?.closest('button');
+      
+      if (cardButton) {
+        // 4. Haz clic en el botón, no en el div
+        cardButton.scrollIntoView({ behavior: "smooth", block: "center" });
+        cardButton.click();
+        return targetTypo.textContent.trim();
       }
     }
+    return null; // No se encontró
   }, servicio);
-  await sleep(3000);
+
+  // Si no se pudo hacer clic, lanza un error claro
+  if (!servicioClicked) {
+    console.error(`Error: No se pudo encontrar o clickear el servicio: "${servicio}"`);
+    throw new Error(`No se pudo encontrar o clickear el servicio: "${servicio}"`);
+  }
+
+  console.log(`✅ Servicio seleccionado: "${servicioClicked}"`);
+  
+  // La siguiente función (buscarEspecialidad) ya tiene un 'waitForSelector' largo,
+  // así que este 'sleep' es solo una pequeña pausa de seguridad.
+  await sleep(2000);
 }
 
 async function buscarEspecialidad(page, especialidad, ubicacion) {
-  await page.waitForSelector('input#filterService');
+  // Intentar múltiples selectores
+  const selectorEspecialidad = 'input#filterService, input[placeholder*="especialidad"], input[name*="service"], input[aria-label*="especialidad"]';
+  const selectorUbicacion = 'input#filterLocation, input[placeholder*="ubicación"], input[name*="location"], input[aria-label*="ubicación"]';
+  
+  console.log("🔍 Esperando selector de especialidad...");
+  await page.waitForSelector(selectorEspecialidad, { timeout: 60000 });
   await sleep(1500);
   
-  const espInput = await page.$('input#filterService');
+  const espInput = await page.$(selectorEspecialidad);
   if (espInput) {
+    console.log("✅ Input de especialidad encontrado");
     await espInput.click();
     await espInput.type(especialidad, { delay: 100 });
     await sleep(800);
@@ -238,8 +295,10 @@ async function buscarEspecialidad(page, especialidad, ubicacion) {
     await sleep(500);
   }
   
-  const locInput = await page.$('input#filterLocation');
+  console.log("🔍 Esperando selector de ubicación...");
+  const locInput = await page.$(selectorUbicacion);
   if (locInput) {
+    console.log("✅ Input de ubicación encontrado");
     await locInput.click();
     await locInput.type(ubicacion, { delay: 100 });
     await sleep(800);
@@ -251,11 +310,13 @@ async function buscarEspecialidad(page, especialidad, ubicacion) {
     await sleep(500);
   }
   
+  console.log("🔍 Buscando botón 'Buscar'...");
   await page.evaluate(() => {
     const btns = Array.from(document.querySelectorAll("button"));
     const btn = btns.find(b => b.textContent.toLowerCase().includes("buscar"));
     if (btn) btn.click();
   });
+  await sleep(2000);
 }
 
 async function obtenerOpcionesDisponibles(page) {
