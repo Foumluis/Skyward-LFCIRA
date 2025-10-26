@@ -82,17 +82,23 @@ async function verifyPassword(password: string, hash: string) {
 // --- CORS ---
 app.use('*', cors());
 
-// --- RUTAS PÚBLICAS (sin cambios) ---
+// --- RUTAS PÚBLICAS (solo se mantiene la limpieza de teléfono) ---
 app.post('/register', async (c) => {
   const { rut, nombrePaciente, fechaNacimiento, idGenero, mail, telefono, password } = await c.req.json<any>();
   if (!rut || !nombrePaciente || !fechaNacimiento || !idGenero || !telefono || !password) {
     return c.json({ error: 'Faltan campos requeridos' }, 400);
   }
+
+  // --- Validación y limpieza de Teléfono (manteniendo el fix) ---
+  const telefonoLimpio = telefono.replace(/\D/g, ''); // Limpiar no dígitos
+  if (telefonoLimpio.length !== 9 || !/^\d{9}$/.test(telefonoLimpio)) {
+      return c.json({ error: 'El teléfono debe ser exactamente 9 dígitos numéricos' }, 400);
+  }
   const passwordHash = await hashPassword(password);
   try {
     const { success } = await c.env.base_de_usuarios.prepare(
       "INSERT INTO paciente (rut, nombrePaciente, fechaNacimiento, idGenero, mail, telefono, password_hash) VALUES (?, ?, ?, ?, ?, ?, ?)"
-    ).bind(rut, nombrePaciente, fechaNacimiento, idGenero, mail || null, telefono, passwordHash).run();
+    ).bind(rut, nombrePaciente, fechaNacimiento, idGenero, mail || null, telefonoLimpio, passwordHash).run(); // Usar telefonoLimpio
     if (success) return c.json({ message: 'Paciente registrado con éxito' }, 201);
     else return c.json({ error: 'No se pudo registrar' }, 500);
   } catch (e: any) {
@@ -165,7 +171,7 @@ app.use('/api/*', bearerAuth({
   }
 }));
 
-// --- RUTAS PRIVADAS EXISTENTES ---
+// --- RUTAS PRIVADAS EXISTENTES (sin cambios) ---
 app.delete('/api/consultas/:id', async (c) => {
   const idConsulta = c.req.param('id');
   const rutPaciente = c.var.jwtPayload.sub;
@@ -262,6 +268,7 @@ async function guardarCitaEnBD(c: Context<Env>, rutPaciente: string, datos: any)
     }
     
     const dia = diaMatch[0].padStart(2, '0');
+    // Asumir mes actual para simplificar la prueba
     const mesActual = (new Date().getMonth() + 1).toString().padStart(2, '0');
     const añoActual = new Date().getFullYear();
     
@@ -360,7 +367,7 @@ app.post('/api/chat', async (c) => {
       });
     }
     
-    // ESTADO: Esperando ubicación -> EJECUTAR BÚSQUEDA
+    // ✅ BLOQUE MODIFICADO: Esperando ubicación -> EJECUTAR BÚSQUEDA
     if (estado?.waitingFor === 'ubicacion') {
       estado.ubicacion = prompt.trim();
       
@@ -375,7 +382,6 @@ app.post('/api/chat', async (c) => {
           return c.json({ role: 'ai', text: 'Error: datos de paciente no encontrados', id: Date.now() }, 500);
         }
         
-        // IMPORTAR LA FUNCIÓN
         const { agendarCitaCompleta } = await import('./agente_snabb_interactivo.js');
         
         const resultado = await agendarCitaCompleta(
@@ -392,7 +398,6 @@ app.post('/api/chat', async (c) => {
           }
         );
         
-        // ✅ MANEJAR CASO DE ERROR
         if (resultado.status === 'error') {
           console.log("📸 Screenshot en error recibido:", resultado.screenshot ? "SÍ" : "NO");
           estadosTemporales.delete(stateKey);
@@ -414,17 +419,35 @@ app.post('/api/chat', async (c) => {
           });
         }
         
-        // Guardar opciones
+        if (!resultado.opciones?.fechas || resultado.opciones.fechas.length === 0) {
+          console.error("❌ No se encontraron fechas válidas en el resultado");
+          estadosTemporales.delete(stateKey);
+          return c.json({
+            role: 'ai',
+            text: 'No pude extraer las fechas disponibles correctamente. ¿Quieres intentar de nuevo?',
+            id: Date.now(),
+            debug_screenshot: resultado.screenshot
+          });
+        }
+        
+        console.log("📅 Fechas capturadas:", resultado.opciones.fechas);
+        console.log("🕐 Horas capturadas:", resultado.opciones.horas);
+        
+        // ✅ Guardar estado para continuar el flujo
         estado.opciones = resultado.opciones;
         estado.browserEstado = resultado.estado;
-        estado.waitingFor = 'fecha';
+        estado.waitingFor = 'fecha_hora'; // ⬅️ NUEVO: esperar fecha Y hora juntas
         estadosTemporales.set(stateKey, estado);
         
         let mensaje = `✅ Encontré horas disponibles!\n\n📅 Fechas disponibles:\n`;
         resultado.opciones.fechas.forEach((f: string, i: number) => {
           mensaje += `${i + 1}. ${f}\n`;
         });
-        mensaje += `\n¿Qué fecha prefieres? (escribe el número o la fecha completa)`;
+        mensaje += `\n🕐 Horas disponibles:\n`;
+        resultado.opciones.horas.forEach((h: string, i: number) => {
+          mensaje += `${i + 1}. ${h}\n`;
+        });
+        mensaje += `\n💡 Escribe la fecha y hora que prefieres.\nEjemplo: "oct. 27 lunes 9:15" o "1 y 1" (primer día, primera hora)`;
         
         return c.json({
           role: 'ai',
@@ -432,7 +455,7 @@ app.post('/api/chat', async (c) => {
           id: Date.now(),
           options: resultado.opciones.fechas,
           debug_screenshot: resultado.screenshot,
-          waitingFor: 'fecha'
+          waitingFor: 'fecha_hora'
         });
         
       } catch (error: any) {
@@ -448,74 +471,57 @@ app.post('/api/chat', async (c) => {
       }
     }
     
-    // ESTADO: Esperando fecha
-    if (estado?.waitingFor === 'fecha') {
+    // ✅ NUEVO BLOQUE: Esperando fecha Y hora juntas -> CONFIRMAR RESERVA
+    if (estado?.waitingFor === 'fecha_hora') {
       let fechaSeleccionada = null;
-      
-      // Intentar parsear número (1, 2, 3...)
-      const numero = parseInt(prompt.trim());
-      if (!isNaN(numero) && numero > 0 && numero <= estado.opciones.fechas.length) {
-        fechaSeleccionada = estado.opciones.fechas[numero - 1];
-      } else {
-        // Buscar coincidencia en las fechas disponibles
-        const normalizar = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
-        fechaSeleccionada = estado.opciones.fechas.find((f: string) => 
-          normalizar(f).includes(normalizar(prompt)) || normalizar(prompt).includes(normalizar(f))
-        );
-      }
-      
-      if (!fechaSeleccionada) {
-        return c.json({
-          role: 'ai',
-          text: `No encontré esa fecha. Por favor elige una de las opciones:\n\n${estado.opciones.fechas.map((f: string, i: number) => `${i+1}. ${f}`).join('\n')}`,
-          id: Date.now(),
-          options: estado.opciones.fechas,
-          waitingFor: 'fecha'
-        });
-      }
-      
-      estado.fechaSeleccionada = fechaSeleccionada;
-      estado.waitingFor = 'hora';
-      estadosTemporales.set(stateKey, estado);
-      
-      let mensaje = `📅 Fecha seleccionada: ${fechaSeleccionada}\n\n🕐 Horas disponibles:\n`;
-      estado.opciones.horas.forEach((h: string, i: number) => {
-        mensaje += `${i + 1}. ${h}\n`;
-      });
-      mensaje += `\n¿Qué hora prefieres?`;
-      
-      return c.json({
-        role: 'ai',
-        text: mensaje,
-        id: Date.now(),
-        options: estado.opciones.horas,
-        waitingFor: 'hora'
-      });
-    }
-    
-    // ESTADO: Esperando hora -> CONFIRMAR RESERVA
-    if (estado?.waitingFor === 'hora') {
       let horaSeleccionada = null;
       
-      const numero = parseInt(prompt.trim());
-      if (!isNaN(numero) && numero > 0 && numero <= estado.opciones.horas.length) {
-        horaSeleccionada = estado.opciones.horas[numero - 1];
-      } else {
-        horaSeleccionada = estado.opciones.horas.find((h: string) => h.includes(prompt.trim()));
+      const textoUsuario = prompt.trim().toLowerCase();
+      
+      // Opción 1: Usuario dice "1 y 2" (índices)
+      const matchIndices = textoUsuario.match(/(\d+)\s*y\s*(\d+)/);
+      if (matchIndices) {
+        const idxFecha = parseInt(matchIndices[1]) - 1;
+        const idxHora = parseInt(matchIndices[2]) - 1;
+        
+        if (idxFecha >= 0 && idxFecha < estado.opciones.fechas.length &&
+            idxHora >= 0 && idxHora < estado.opciones.horas.length) {
+          fechaSeleccionada = estado.opciones.fechas[idxFecha];
+          horaSeleccionada = estado.opciones.horas[idxHora];
+        }
       }
       
-      if (!horaSeleccionada) {
+      // Opción 2: Usuario dice "oct. 27 lunes 9:15" (texto completo)
+      if (!fechaSeleccionada || !horaSeleccionada) {
+        const normalizar = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+        
+        // Buscar fecha
+        fechaSeleccionada = estado.opciones.fechas.find((f: string) => 
+          normalizar(textoUsuario).includes(normalizar(f))
+        );
+        
+        // Buscar hora (formato HH:MM)
+        const matchHora = textoUsuario.match(/\d{1,2}:\d{2}/);
+        if (matchHora) {
+          horaSeleccionada = estado.opciones.horas.find((h: string) => h === matchHora[0]);
+        }
+      }
+      
+      // Validar que tengamos ambos
+      if (!fechaSeleccionada || !horaSeleccionada) {
         return c.json({
           role: 'ai',
-          text: `No encontré esa hora. Por favor elige una de las opciones:\n\n${estado.opciones.horas.map((h: string, i: number) => `${i+1}. ${h}`).join('\n')}`,
+          text: `No pude identificar la fecha y hora. Por favor intenta de nuevo.\n\nEjemplos válidos:\n• "1 y 1" (primer día, primera hora)\n• "oct. 27 lunes 9:15"\n• "27 9:15"\n\nFechas: ${estado.opciones.fechas.join(', ')}\nHoras: ${estado.opciones.horas.join(', ')}`,
           id: Date.now(),
-          options: estado.opciones.horas,
-          waitingFor: 'hora'
+          waitingFor: 'fecha_hora'
         });
       }
       
+      // ✅ CONFIRMACIÓN FINAL
       try {
-        console.log("✅ Confirmando reserva...");
+        console.log("⚡ Confirmando reserva...");
+        console.log(`📅 Fecha: "${fechaSeleccionada}"`);
+        console.log(`🕐 Hora: "${horaSeleccionada}"`);
         
         const pacienteData = await c.env.base_de_usuarios.prepare(
           "SELECT rut, telefono, mail FROM paciente WHERE rut = ?"
@@ -526,7 +532,7 @@ app.post('/api/chat', async (c) => {
         const resultado = await confirmarCita(
           c.env,
           estado.browserEstado,
-          estado.fechaSeleccionada,
+          fechaSeleccionada,
           horaSeleccionada,
           {
             rut: pacienteData!.rut,
@@ -535,7 +541,6 @@ app.post('/api/chat', async (c) => {
           }
         );
         
-        // ✅ MANEJAR CASO DE ERROR EN CONFIRMACIÓN
         if (resultado.status === 'error') {
           estadosTemporales.delete(stateKey);
           return c.json({
@@ -549,16 +554,15 @@ app.post('/api/chat', async (c) => {
         // Guardar en BD
         await guardarCitaEnBD(c, rutPaciente, {
           especialidad: estado.especialidad,
-          fecha: estado.fechaSeleccionada,
+          fecha: fechaSeleccionada,
           hora: horaSeleccionada
         });
         
-        // Limpiar estado
         estadosTemporales.delete(stateKey);
         
         return c.json({
           role: 'ai',
-          text: `${resultado.message}\n\n✅ Especialidad: ${estado.especialidad}\n📅 Fecha: ${estado.fechaSeleccionada}\n🕐 Hora: ${horaSeleccionada}\n🏥 Ubicación: ${estado.ubicacion}\n\nRecibirás una confirmación por correo.`,
+          text: `${resultado.message}\n\n✅ Especialidad: ${estado.especialidad}\n📅 Fecha: ${fechaSeleccionada}\n🕐 Hora: ${horaSeleccionada}\n🏥 Ubicación: ${estado.ubicacion}\n\nRecibirás una confirmación por correo.`,
           id: Date.now(),
           debug_screenshot: resultado.screenshot
         });
@@ -575,6 +579,10 @@ app.post('/api/chat', async (c) => {
         }, 500);
       }
     }
+
+    // REMOVER ESTADOS ANTIGUOS: 'fecha' y 'hora'
+    // if (estado?.waitingFor === 'fecha') { ... } // BLOQUE ELIMINADO
+    // if (estado?.waitingFor === 'hora') { ... } // BLOQUE ELIMINADO
     
     // INICIO: Detectar intención de agendar
     const intentoAgendar = /agendar|reserv|cita|hora|consulta|necesito|quiero/i.test(prompt);

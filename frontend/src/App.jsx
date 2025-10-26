@@ -64,13 +64,19 @@ const AuthView = ({ onLogin }) => {
             if (rutLimpio.length <= 9 && /^[\dkK]*$/.test(rutLimpio)) {
                 setFormData(prev => ({ ...prev, [name]: rutLimpio }));
             }
-        } else {
-            setFormData(prev => ({ ...prev, [name]: value }));
+        } else if (name === 'telefono') { // <--- NUEVO BLOQUE
+        // Solo permite números y limita la longitud a 9
+        const telefonoLimpio = value.replace(/\D/g, '');
+            if (telefonoLimpio.length <= 9) {
+            setFormData(prev => ({ ...prev, [name]: telefonoLimpio }));
         }
-        
-        if (errors[name]) setErrors(prev => ({ ...prev, [name]: '' }));
-        if (apiError) setApiError('');
-    };
+            } else {
+             setFormData(prev => ({ ...prev, [name]: value }));
+        }
+
+    if (errors[name]) setErrors(prev => ({ ...prev, [name]: '' }));
+    if (apiError) setApiError('');
+};
 
     const validateForm = () => {
         const newErrors = {};
@@ -86,8 +92,10 @@ const AuthView = ({ onLogin }) => {
             if (!formData.email.trim()) newErrors.email = 'El email es requerido';
             else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email)) newErrors.email = 'Email inválido';
             if (!formData.telefono.trim()) newErrors.telefono = 'El teléfono es requerido';
-            else if (!/^\+?[\d\s-]{8,}$/.test(formData.telefono)) newErrors.telefono = 'Teléfono inválido';
-            if (formData.password !== formData.confirmPassword) newErrors.confirmPassword = 'Las contraseñas no coinciden';
+    // CAMBIO: Debe ser exactamente 9 dígitos
+    else if (!/^\d{9}$/.test(formData.telefono)) newErrors.telefono = 'Teléfono inválido. Debe ser 9 dígitos.'; 
+
+    if (formData.password !== formData.confirmPassword) newErrors.confirmPassword = 'Las contraseñas no coinciden';
         }
         setErrors(newErrors);
         return Object.keys(newErrors).length === 0;
@@ -260,18 +268,21 @@ const AuthView = ({ onLogin }) => {
                                 {errors.email && <p className="text-red-500 text-xs mt-1">{errors.email}</p>}
                             </div>
 
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-1">Teléfono</label>
-                                <input
-                                    type="tel"
-                                    name="telefono"
-                                    value={formData.telefono}
-                                    onChange={handleChange}
-                                    placeholder="+56 9 1234 5678"
-                                    className={`w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 ${errors.telefono ? 'border-red-500' : 'border-gray-300'}`}
-                                />
-                                {errors.telefono && <p className="text-red-500 text-xs mt-1">{errors.telefono}</p>}
-                            </div>
+<div>
+    <label className="block text-sm font-medium text-gray-700 mb-1">Teléfono</label>
+    <input
+        type="tel"
+        name="telefono"
+        value={formData.telefono}
+        onChange={handleChange}
+        // CAMBIO: Nuevo placeholder y inputmode
+        placeholder="975506984" 
+        inputMode="numeric"
+        // FIN CAMBIO
+        className={`w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 ${errors.telefono ? 'border-red-500' : 'border-gray-300'}`}
+    />
+    {errors.telefono && <p className="text-red-500 text-xs mt-1">{errors.telefono}</p>}
+</div>
                         </>
                     )}
 
@@ -513,6 +524,8 @@ const ChatView = ({ chatHistory, setChatHistory, isProcessing, setIsProcessing, 
             const audioBlob = await audioResponse.blob();
             const audioUrl = URL.createObjectURL(audioBlob);
             const audio = new Audio(audioUrl);
+
+            audio.playbackRate = 2.0;
 
             await new Promise((resolve) => {
                 audio.onended = resolve;
