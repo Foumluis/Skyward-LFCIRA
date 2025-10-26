@@ -2,7 +2,7 @@
 set -e
 
 echo "📦 Instalando dependencias de Node..."
-npm ci
+npm install
 
 echo "🌐 Descargando Chrome para Puppeteer..."
 npx puppeteer browsers install chrome
