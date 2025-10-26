@@ -1,0 +1,26 @@
+{
+  "name": "agente-redsalud",
+  "version": "1.0.0",
+  "description": "Bot automatizado para reservar horas médicas en RedSalud Chile usando Puppeteer",
+  "main": "agente_redsalud.js",
+  "type": "module",
+  "scripts": {
+    "start": "node agente_redsalud.js",
+    "dev": "node --watch agente_redsalud.js"
+  },
+  "keywords": [
+    "redsalud",
+    "automation",
+    "puppeteer",
+    "bot",
+    "chile"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "puppeteer": "^23.7.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
